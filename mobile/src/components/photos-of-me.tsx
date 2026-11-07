@@ -1,0 +1,184 @@
+import { useFocusEffect, useRouter } from 'expo-router';
+import { type ReactNode, useCallback, useRef, useState } from 'react';
+import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+
+import { Button, colors, Hint } from '@/components/ui';
+import { en } from '@/i18n/en';
+import { clearMatchRun, type FaceData, lastMatchRun, loadFaceData, runFaceMatch } from '@/lib/face';
+import { faceJobCounts, faceViewState, type MatchRun, photosOfMe, shouldRunMatch } from '@/lib/face-plan';
+import { errorMessage } from '@/lib/errors';
+import type { Media } from '@/lib/media';
+
+type Props = {
+  roomId: string;
+  userId: string;
+  media: Media[];
+  columns: number;
+  gap: number;
+  renderTile: (item: Media) => ReactNode;
+  onRefreshMedia: () => void;
+};
+
+/** The gallery's "Me" filter: my matched photos in this room, or setup, disabled and error states. */
+export function PhotosOfMe({ roomId, userId, media, columns, gap, renderTile, onRefreshMedia }: Props) {
+  const router = useRouter();
+  // loadedAt: when the jobs were read; stale 'running' jobs are judged against it.
+  const [data, setData] = useState<(FaceData & { loadedAt: number }) | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [run, setRun] = useState<MatchRun | null>(() => lastMatchRun(roomId));
+  const [running, setRunning] = useState(false);
+  const runningRef = useRef(false);
+
+  const load = useCallback(async () => {
+    try {
+      const next = await loadFaceData(roomId, userId);
+      setData({ ...next, loadedAt: Date.now() });
+      setLoadError(null);
+      return next;
+    } catch (e) {
+      setLoadError(errorMessage(e));
+      return null;
+    }
+  }, [roomId, userId]);
+
+  /** Loads my face data and, only while jobs are pending (FG-2), asks the service once to process them. */
+  const refresh = useCallback(async () => {
+    const next = await load();
+    // F7-2: pick up a run made elsewhere (the enrollment screen) while this view stayed mounted.
+    setRun(lastMatchRun(roomId));
+    if (!next?.enrollment || runningRef.current) return;
+    if (!shouldRunMatch(false, faceJobCounts(next.jobs, Date.now()).pending)) return;
+    runningRef.current = true;
+    setRunning(true);
+    try {
+      setRun(await runFaceMatch(roomId));
+      await load();
+    } finally {
+      runningRef.current = false;
+      setRunning(false);
+    }
+  }, [load, roomId]);
+
+  useFocusEffect(
+    useCallback(() => {
+      refresh();
+    }, [refresh]),
+  );
+
+  if (loadError && !data) {
+    return (
+      <View style={styles.center}>
+        <Hint tone="error">{en.face.loadError}</Hint>
+        <Button title={en.home.retry} variant="secondary" onPress={refresh} />
+      </View>
+    );
+  }
+  if (!data) return <ActivityIndicator style={styles.loading} />;
+
+  const counts = faceJobCounts(data.jobs, data.loadedAt);
+  const view = faceViewState({ enrolled: !!data.enrollment, run, pending: counts.pending });
+  const openSetup = () => router.push({ pathname: '/room/[id]/face', params: { id: roomId } });
+
+  if (view === 'consent') {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.title}>{en.face.title}</Text>
+        <Hint>{en.face.intro}</Hint>
+        <Button title={en.face.setUp} onPress={openSetup} />
+      </View>
+    );
+  }
+
+  const manage = (
+    <Pressable onPress={openSetup} accessibilityRole="button" hitSlop={8}>
+      <Text style={styles.link}>{en.face.manage}</Text>
+    </Pressable>
+  );
+
+  // FG-3: while matching is off, no badges and no counts; only the truthful notice.
+  if (view === 'disabled') {
+    return (
+      <View style={styles.center}>
+        <Hint>{en.face.disabled}</Hint>
+        {manage}
+      </View>
+    );
+  }
+  if (view === 'error' && run?.kind === 'error') {
+    return (
+      <View style={styles.center}>
+        <Hint tone="error">{en.face.runError(run.message)}</Hint>
+        <Button
+          title={en.home.retry}
+          variant="secondary"
+          busy={running}
+          onPress={() => {
+            clearMatchRun(roomId);
+            setRun(null);
+            refresh();
+          }}
+        />
+        {manage}
+      </View>
+    );
+  }
+
+  const items = photosOfMe(media, data.matches);
+  return (
+    <FlatList
+      data={items}
+      keyExtractor={(m) => m.id}
+      numColumns={columns}
+      columnWrapperStyle={{ gap }}
+      contentContainerStyle={{ gap }}
+      contentInsetAdjustmentBehavior="automatic"
+      onRefresh={() => {
+        onRefreshMedia();
+        refresh();
+      }}
+      refreshing={false}
+      ListHeaderComponent={
+        <View style={styles.header}>
+          <View style={styles.headerText}>
+            {view === 'checking' ? <Hint>{en.face.checking(counts.pending)}</Hint> : null}
+            {counts.failed > 0 ? <Hint tone="error">{en.face.failed(counts.failed)}</Hint> : null}
+          </View>
+          {manage}
+        </View>
+      }
+      ListEmptyComponent={
+        <View style={styles.center}>
+          <Text style={styles.title}>{en.face.empty}</Text>
+          <Hint>{en.face.emptyHint}</Hint>
+        </View>
+      }
+      renderItem={({ item }) => (
+        <View>
+          {renderTile(item)}
+          <View style={styles.badge} pointerEvents="none">
+            <Text style={styles.badgeText}>{en.face.likelyYou}</Text>
+          </View>
+        </View>
+      )}
+    />
+  );
+}
+
+const styles = StyleSheet.create({
+  loading: { marginTop: 40 },
+  center: { padding: 24, gap: 12, alignItems: 'center' },
+  title: { fontSize: 17, fontWeight: '600', color: colors.label, textAlign: 'center' },
+  link: { fontSize: 15, fontWeight: '500', color: colors.tint },
+  header: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 12, paddingBottom: 8 },
+  headerText: { flex: 1, gap: 4 },
+  badge: {
+    position: 'absolute',
+    left: 6,
+    bottom: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  badgeText: { fontSize: 11, fontWeight: '600', color: 'white' },
+});
