@@ -92,3 +92,75 @@ export function createMatchRunCache() {
     },
   };
 }
+
+// FM-Q A′-2: temporary detection copies -------------------------------------------------------------------
+// At match time this device makes a ~1920px JPEG (EXIF/GPS dropped by the re-encode) of each photo it is about
+// to submit, uploads it to room-media/{room}/{media}/detect/{enrollment}.jpg, and the face-match function compares
+// it and deletes it at once. Format: keep in sync with supabase/functions/_shared/detect.ts.
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Long edge of a detection copy (the 480px preview was too small for small faces). */
+export const DETECT_LONG_EDGE = 1920;
+/** Jobs per face-match call; the function accepts at most 5 job ids, and each copy lives for one call. */
+export const DETECT_BATCH_SIZE = 5;
+/** Photos prepared at once on the device (memory and data use). */
+export const DETECT_CONCURRENCY = 2;
+/** Rekognition's inline image limit; the function falls back to the preview above it. */
+export const DETECT_MAX_BYTES = 5 * 1024 * 1024;
+
+export function faceDetectPath(roomId: string, mediaId: string, enrollmentId: string): string | null {
+  if (![roomId, mediaId, enrollmentId].every((s) => UUID_RE.test(s))) return null;
+  return `${roomId}/${mediaId}/detect/${enrollmentId}.jpg`;
+}
+
+/** Resize for a detection copy: long edge to DETECT_LONG_EDGE, or null to keep the size (never `{}`, see F7-1). */
+export function detectResize(width: number | null | undefined, height: number | null | undefined): { width: number } | { height: number } | null {
+  if (typeof width !== 'number' || typeof height !== 'number' || !Number.isFinite(width) || !Number.isFinite(height)) return null;
+  if (Math.max(width, height) <= DETECT_LONG_EDGE) return null;
+  return width >= height ? { width: DETECT_LONG_EDGE } : { height: DETECT_LONG_EDGE };
+}
+
+type DetectJobLike = JobLike & { id: string; media_id: string; created_at: string };
+
+/**
+ * The jobs the function would claim (queued, or running-stale with attempts left, under the attempt cap),
+ * oldest first, split into batches of DETECT_BATCH_SIZE. Only these get a detection copy.
+ */
+export function detectBatches<J extends DetectJobLike>(jobs: readonly J[], now: number): J[][] {
+  const open = jobs
+    .filter((j) => {
+      if (j.attempts >= FACE_JOB_MAX_ATTEMPTS) return false;
+      if (j.status === 'queued') return true;
+      return j.status === 'running' && now - Date.parse(j.updated_at) > FACE_JOB_STALE_MS;
+    })
+    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+  const out: J[][] = [];
+  for (let i = 0; i < open.length; i += DETECT_BATCH_SIZE) out.push(open.slice(i, i + DETECT_BATCH_SIZE));
+  return out;
+}
+
+/**
+ * Upload result. 'exists': a copy from an interrupted run is still there (insert-only path, so no overwrite).
+ * Only this member can write that path, for the same immutable ready photo, so the copy is used as is.
+ */
+export function classifyDetectUpload(error: { message?: string; statusCode?: string | number; status?: string | number } | null): 'uploaded' | 'exists' | 'failed' {
+  if (!error) return 'uploaded';
+  const code = String(error.statusCode ?? error.status ?? '');
+  if (code === '409' || /already exists|duplicate/i.test(error.message ?? '')) return 'exists';
+  return 'failed';
+}
+
+/** Runs fn over items with at most `limit` in flight; results keep the input order. */
+export async function mapLimit<T, R>(items: readonly T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(Math.max(1, limit), items.length) }, worker));
+  return out;
+}

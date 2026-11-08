@@ -1,12 +1,25 @@
 import { FunctionsHttpError } from '@supabase/supabase-js';
 import { randomUUID } from 'expo-crypto';
-import { File } from 'expo-file-system';
+import { Directory, File, Paths } from 'expo-file-system';
 import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 
 import { en } from '@/i18n/en';
 
-import { classifyMatchRun, createMatchRunCache, faceRefResize, type MatchRun } from './face-plan';
+import {
+  classifyDetectUpload,
+  classifyMatchRun,
+  createMatchRunCache,
+  DETECT_CONCURRENCY,
+  DETECT_MAX_BYTES,
+  detectBatches,
+  detectResize,
+  faceDetectPath,
+  faceRefResize,
+  mapLimit,
+  type MatchRun,
+} from './face-plan';
+import { authHeaders, freshToken, objectUrl } from './media';
 import { supabase } from './supabase';
 
 /**
@@ -55,9 +68,12 @@ export async function enrollFace(roomId: string, photoUri: string): Promise<{ en
   if (upErr) return { error: upErr.message };
   const { data, error } = await supabase.rpc('enroll_face', { p_room_id: roomId, p_ref_path: path });
   if (error) {
-    // FG-R1: best effort; face-refs has no owner delete policy today, so this may remove nothing.
-    // The room's whole face-refs prefix is still deleted by the janitor when the room is deleted.
-    await supabase.storage.from('face-refs').remove([path]).catch(() => undefined);
+    // FG-R1: enroll_face is one transaction, so on failure no enrollment points at `path` (and a failed
+    // Replace keeps the previous enrollment). room-janitor's orphan sweep (every 15 min) deletes face-refs
+    // objects that no enrollment references once they are older than 1 hour (ORPHAN_AGE_MS), so this upload
+    // is removed within about 75 minutes, or earlier with the room. No client delete here on purpose:
+    // face-refs has no DELETE policy, and an error can also mean the call committed but the response was
+    // lost, in which case deleting `path` would break a live enrollment.
     return { error: error.message };
   }
   return { enrollmentId: data };
@@ -107,25 +123,113 @@ export function clearMatchRun(roomId: string) {
   lastRuns.clear(roomId);
 }
 
+async function invokeFaceMatch(body: { probe: true } | { jobIds: string[] }): Promise<MatchRun> {
+  try {
+    const { error } = await supabase.functions.invoke('face-match', { body });
+    if (!error) return classifyMatchRun({ status: 200 });
+    if (error instanceof FunctionsHttpError) {
+      const res = error.context as Response;
+      const data = await res.json().catch(() => null);
+      return classifyMatchRun({ status: res.status, error: typeof data?.error === 'string' ? data.error : undefined });
+    }
+    return classifyMatchRun({ status: 0, error: error.message });
+  } catch (e) {
+    return classifyMatchRun({ status: 0, error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+type DetectMedia = { id: string; room_id: string; original_path: string; width: number | null; height: number | null };
+
 /**
- * Asks the face-match function to process my queued jobs (the server limits it to my own
- * enrollments). While FACE_MATCH_ENABLED is off it answers 503 face_match_disabled.
+ * FM-Q A′-2: makes a temporary ~1920px JPEG of one ready photo and uploads it to the detect path that only
+ * face-match reads. The re-encode drops EXIF/GPS. Local files are deleted on every path. Any failure is
+ * 'failed', and face-match then falls back to the preview, so a failed copy never blocks matching.
+ */
+async function uploadDetectCopy(media: DetectMedia, enrollmentId: string): Promise<'uploaded' | 'exists' | 'failed'> {
+  const path = faceDetectPath(media.room_id, media.id, enrollmentId);
+  if (!path) return 'failed';
+  const dir = new Directory(Paths.cache, 'face-detect', randomUUID());
+  try {
+    dir.create({ intermediates: true, idempotent: true });
+    const token = await freshToken();
+    const original = await File.createDownloadTask(objectUrl(media.original_path), new File(dir, 'original'), {
+      headers: authHeaders(token),
+    }).downloadAsync();
+    if (!original) return 'failed';
+    let context = ImageManipulator.manipulate(original.uri);
+    const resize = detectResize(media.width, media.height);
+    if (resize) context = context.resize(resize);
+    const image = await context.renderAsync();
+    const saved = await image.saveAsync({ format: SaveFormat.JPEG, compress: 0.85 });
+    // ArrayBuffer body, not Blob: React Native Blob uploads can be stored empty.
+    const bytes = await new File(saved.uri).arrayBuffer();
+    new File(saved.uri).delete();
+    if (bytes.byteLength === 0 || bytes.byteLength > DETECT_MAX_BYTES) return 'failed';
+    const { error } = await supabase.storage.from('room-media').upload(path, bytes, { contentType: 'image/jpeg', upsert: false });
+    return classifyDetectUpload(error as { message?: string; statusCode?: string | number; status?: string | number } | null);
+  } catch {
+    return 'failed';
+  } finally {
+    try {
+      if (dir.exists) dir.delete();
+    } catch {
+      // Cache cleanup is best effort; the OS may also purge Paths.cache.
+    }
+  }
+}
+
+/**
+ * Asks the face-match function to process my open jobs in this room (the server limits it to my own
+ * enrollments). While FACE_MATCH_ENABLED is off the probe answers 503 face_match_disabled and nothing
+ * is uploaded. Otherwise, per batch of up to 5 jobs: upload a detection copy of each photo, then one
+ * call that compares and deletes those copies.
  */
 export async function runFaceMatch(roomId: string): Promise<MatchRun> {
-  let run: MatchRun;
-  try {
-    const { error } = await supabase.functions.invoke('face-match', { body: {} });
-    if (!error) run = classifyMatchRun({ status: 200 });
-    else if (error instanceof FunctionsHttpError) {
-      const res = error.context as Response;
-      const body = await res.json().catch(() => null);
-      run = classifyMatchRun({ status: res.status, error: typeof body?.error === 'string' ? body.error : undefined });
-    } else run = classifyMatchRun({ status: 0, error: error.message });
-  } catch (e) {
-    run = classifyMatchRun({ status: 0, error: e instanceof Error ? e.message : String(e) });
-  }
+  const run = await runFaceMatchBatches(roomId);
   lastRuns.set(roomId, run);
   return run;
+}
+
+async function runFaceMatchBatches(roomId: string): Promise<MatchRun> {
+  const probe = await invokeFaceMatch({ probe: true });
+  if (probe.kind !== 'ok') return probe;
+  try {
+    const { data: auth } = await supabase.auth.getUser();
+    const userId = auth.user?.id;
+    if (!userId) return { kind: 'error', message: en.errors.notSignedIn };
+    const { data: enrollment, error: enrErr } = await supabase
+      .from('face_enrollments')
+      .select('id')
+      .eq('room_id', roomId)
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (enrErr) throw enrErr;
+    if (!enrollment) return { kind: 'ok' };
+    const { data: jobs, error: jobErr } = await supabase
+      .from('face_jobs')
+      .select('id, media_id, status, attempts, updated_at, created_at')
+      .eq('enrollment_id', enrollment.id);
+    if (jobErr) throw jobErr;
+    for (const batch of detectBatches(jobs ?? [], Date.now())) {
+      const { data: media, error: mediaErr } = await supabase
+        .from('media')
+        .select('id, room_id, original_path, width, height')
+        .in(
+          'id',
+          batch.map((j) => j.media_id),
+        )
+        .eq('kind', 'photo')
+        .eq('status', 'ready');
+      if (mediaErr) throw mediaErr;
+      // Photos that are gone or not ready get no copy; the function marks those jobs itself.
+      await mapLimit(media ?? [], DETECT_CONCURRENCY, (m) => uploadDetectCopy(m, enrollment.id));
+      const result = await invokeFaceMatch({ jobIds: batch.map((j) => j.id) });
+      if (result.kind !== 'ok') return result;
+    }
+    return { kind: 'ok' };
+  } catch (e) {
+    return { kind: 'error', message: e instanceof Error ? e.message : String(e) };
+  }
 }
 
 /** "Not me": hides a photo from Photos of me (only the `excluded` column is writable). */

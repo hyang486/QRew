@@ -1,7 +1,7 @@
 import { Image } from 'expo-image';
 import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useState } from 'react';
-import { ActivityIndicator, Alert, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, RefreshControl, StyleSheet, Text, View } from 'react-native';
 
 import { Button, colors, Hint, Screen } from '@/components/ui';
 import { en } from '@/i18n/en';
@@ -16,6 +16,7 @@ import {
   removeFaceEnrollment,
   runFaceMatch,
 } from '@/lib/face';
+import { createLatestLoader } from '@/lib/latest-load';
 
 type State =
   | { status: 'loading' }
@@ -36,23 +37,48 @@ export default function FaceScreen() {
   const [picked, setPicked] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  // FG-L1: focus and pull loads can overlap; only the newest one is applied.
+  const [runLatest] = useState(createLatestLoader);
 
   const load = useCallback(async () => {
     if (!userId) return;
-    try {
-      const { enrollment } = await loadFaceData(id, userId);
-      const refUrl = enrollment ? await faceRefUrl(enrollment.ref_path) : null;
-      setState({ status: 'ready', enrollment, refUrl });
-    } catch (e) {
-      setState({ status: 'error', message: errorMessage(e) });
-    }
-  }, [id, userId]);
+    await runLatest(
+      `${id}|${userId}`,
+      async () => {
+        const { enrollment } = await loadFaceData(id, userId);
+        const refUrl = enrollment ? await faceRefUrl(enrollment.ref_path) : null;
+        return { enrollment, refUrl };
+      },
+      (outcome) => {
+        if (outcome.ok) {
+          setState({ status: 'ready', ...outcome.data });
+          return;
+        }
+        // A failed refresh keeps the screen that is already shown and says why.
+        const text = errorMessage(outcome.error);
+        setState((prev) => (prev.status === 'ready' ? prev : { status: 'error', message: text }));
+        setMessage(text);
+      },
+    );
+  }, [id, userId, runLatest]);
 
   useFocusEffect(
     useCallback(() => {
       load();
     }, [load]),
   );
+
+  const pullRefresh = useCallback(async () => {
+    setRefreshing(true);
+    setMessage(null);
+    try {
+      await load();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [load]);
+  const refreshControl = <RefreshControl refreshing={refreshing} onRefresh={pullRefresh} enabled={!busy} />;
 
   async function pick(source: 'camera' | 'library') {
     setMessage(null);
@@ -119,14 +145,14 @@ export default function FaceScreen() {
     return (
       <Screen>
         <Hint tone="error">{state.message}</Hint>
-        <Button title={en.home.retry} variant="secondary" onPress={load} />
+        <Button title={en.home.retry} variant="secondary" busy={refreshing} onPress={pullRefresh} />
       </Screen>
     );
   }
 
   if (state.enrollment && !replacing) {
     return (
-      <Screen>
+      <Screen refreshControl={refreshControl}>
         <Text style={styles.sectionTitle}>{en.face.referenceTitle}</Text>
         {state.refUrl ? (
           <Image source={{ uri: state.refUrl }} style={styles.preview} contentFit="cover" accessibilityLabel={en.face.referenceTitle} />
@@ -149,7 +175,7 @@ export default function FaceScreen() {
   }
 
   return (
-    <Screen>
+    <Screen refreshControl={refreshControl}>
       <Text style={styles.title} accessibilityRole="header">
         {en.face.consentTitle}
       </Text>

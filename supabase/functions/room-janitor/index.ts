@@ -1,6 +1,6 @@
 // room-janitor Edge Function: deletes expired/ended rooms (cascade + cleanup_jobs via triggers),
 // removes queued storage prefixes through the Storage API and verifies them empty, sweeps orphaned
-// face references. Never calls AWS. Auth: header x-janitor-secret is checked against private.janitor_config via janitor_secret_ok (pg_net sends it from inside the database).
+// face references, and (FM-Q A′-2) removes face-detection copies older than 15 minutes. Never calls AWS. Auth: header x-janitor-secret is checked against private.janitor_config via janitor_secret_ok (pg_net sends it from inside the database).
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
 import { runJanitor, type CleanupJob, type JanitorStore, type StoredObject } from './core.ts';
@@ -81,6 +81,12 @@ Deno.serve(async (req) => {
       const { data, error } = await admin.from('face_enrollments').select('ref_path');
       if (error) throw error;
       return new Set((data ?? []).map((e) => e.ref_path));
+    },
+    async listDetectObjects() {
+      // Listing only (service_role RPC over storage.objects); deletion goes through removeObjects (Storage API).
+      const { data, error } = await admin.rpc('janitor_detect_objects', { p_limit: 1000 });
+      if (error) throw error;
+      return ((data ?? []) as { name: string; created_at: string }[]).map((o) => ({ name: o.name, createdAt: o.created_at }));
     },
     async listAllObjects(bucket) {
       const out: StoredObject[] = [];

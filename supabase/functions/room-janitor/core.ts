@@ -1,4 +1,5 @@
 // Expiry + storage cleanup worker logic. Pure: all I/O goes through JanitorStore, so it is tested offline.
+import { staleDetectObjects } from '../_shared/detect.ts';
 
 export type CleanupJob = { id: string; bucket: string; prefix: string; created_at: string; attempts: number };
 export type StoredObject = { name: string; createdAt: string };
@@ -15,6 +16,8 @@ export interface JanitorStore {
   /** face-refs object names that an enrollment still points to. */
   activeFaceRefPaths(): Promise<Set<string>>;
   listAllObjects(bucket: string): Promise<StoredObject[]>;
+  /** FM-Q A′-2: room-media detect copies ({room}/{media}/detect/*) with their creation time (listing only). */
+  listDetectObjects(): Promise<StoredObject[]>;
 }
 
 export type JanitorSummary = {
@@ -23,6 +26,8 @@ export type JanitorSummary = {
   jobsRetrying: number;
   objectsRemoved: number;
   orphansRemoved: number;
+  /** FM-Q A′-2: detect copies older than DETECT_TTL_MS removed through the Storage API. */
+  detectRemoved: number;
   /** Jobs that failed again and have now failed STUCK_ATTEMPTS times or more (J1: visible repeated failure). */
   jobsStuck: number;
   /** Per-job counts, for before/after evidence. */
@@ -49,7 +54,7 @@ export async function runJanitor(
   opts: { now: Date; roomLimit: number; jobLimit: number; log?: (event: string, f: Record<string, string | number>) => void },
 ): Promise<JanitorSummary> {
   const log = opts.log ?? (() => {});
-  const out: JanitorSummary = { roomsDeleted: 0, jobsVerified: 0, jobsRetrying: 0, objectsRemoved: 0, orphansRemoved: 0, jobsStuck: 0, jobs: [] };
+  const out: JanitorSummary = { roomsDeleted: 0, jobsVerified: 0, jobsRetrying: 0, objectsRemoved: 0, orphansRemoved: 0, detectRemoved: 0, jobsStuck: 0, jobs: [] };
 
   out.roomsDeleted = (await store.deleteExpiredRooms(opts.roomLimit)).length;
 
@@ -92,6 +97,16 @@ export async function runJanitor(
     out.orphansRemoved = orphans.length;
   } catch {
     log('orphan_sweep_error', {});
+  }
+
+  // FM-Q A′-2 backstop: face-match deletes each detect copy in finally; this removes any left by a crash,
+  // an aborted batch or an interrupted upload once it is older than the TTL.
+  try {
+    const stale = staleDetectObjects(await store.listDetectObjects(), opts.now);
+    if (stale.length) await store.removeObjects('room-media', stale.map((o) => o.name));
+    out.detectRemoved = stale.length;
+  } catch {
+    log('detect_sweep_error', {});
   }
   return out;
 }

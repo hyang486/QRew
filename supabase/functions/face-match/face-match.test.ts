@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHmac, createHash } from 'node:crypto';
 import test from 'node:test';
 
+import { DETECT_TTL_MS, detectObjectPath, isDetectObjectName, staleDetectObjects } from '../_shared/detect.ts';
 import { MAX_ATTEMPTS, processBatch, type FaceStore, type Job } from './core.ts';
 import { FaceProviderError, type FaceProvider } from './provider.ts';
 import { classifyAwsError, createRekognitionProvider } from './rekognition.ts';
@@ -10,19 +11,45 @@ import { signV4 } from './sigv4.ts';
 
 const bytes = (n: number) => new Uint8Array(n).fill(7);
 
-function makeStore(opts: { enrollments?: string[]; jobs: Job[]; photos?: Record<string, string>; access?: 'ok' | 'room_closed' | 'not_member'; goneMedia?: string[] }) {
+const ROOM = '11111111-1111-4111-8111-111111111111';
+const OTHER_ROOM = '22222222-2222-4222-8222-222222222222';
+
+function makeStore(opts: {
+  enrollments?: string[];
+  jobs: Job[];
+  photos?: Record<string, string>;
+  access?: 'ok' | 'room_closed' | 'not_member';
+  goneMedia?: string[];
+  /** room-media objects by path; when set, only these (plus face-refs) download. */
+  objects?: Record<string, Uint8Array>;
+  photoRoom?: Record<string, string>;
+  removeFails?: boolean;
+}) {
   const live = new Set(opts.enrollments ?? ['e1']);
   const saved: { e: string; m: string; sim: number | null; matched: boolean }[] = [];
   const finished: { id: string; status: string; error: string | null }[] = [];
-  const store: FaceStore & { live: Set<string>; saved: typeof saved; finished: typeof finished } = {
+  const removed: string[] = [];
+  const downloads: string[] = [];
+  const store: FaceStore & { live: Set<string>; saved: typeof saved; finished: typeof finished; removed: string[]; downloads: string[] } = {
     live,
     saved,
     finished,
+    removed,
+    downloads,
     claimJobs: async () => opts.jobs,
-    getEnrollment: async (id) => (live.has(id) ? { id, ref_path: `r/u/${id}.jpg` } : null),
+    getEnrollment: async (id) => (live.has(id) ? { id, ref_path: `r/u/${id}.jpg`, room_id: ROOM } : null),
     enrollmentAccess: async () => opts.access ?? 'ok',
-    getPhotoPath: async (m) => (opts.goneMedia?.includes(m) ? null : opts.photos?.[m] ?? `r/${m}.jpg`),
-    download: async () => bytes(10),
+    getPhoto: async (m) =>
+      opts.goneMedia?.includes(m) ? null : { room_id: opts.photoRoom?.[m] ?? ROOM, fallback_path: opts.photos?.[m] ?? `r/${m}.jpg` },
+    download: async (bucket, path) => {
+      downloads.push(`${bucket}:${path}`);
+      if (bucket === 'face-refs' || !opts.objects) return bytes(10);
+      return opts.objects[path] ?? null;
+    },
+    removeObject: async (_bucket, path) => {
+      if (opts.removeFails) throw new Error('storage down');
+      removed.push(path);
+    },
     saveMatch: async (e, m, r) => {
       if (!live.has(e)) return 'stale';
       saved.push({ e, m, sim: r.similarity, matched: r.matched });
@@ -134,7 +161,126 @@ test('logs carry job ids and error kinds only', async () => {
     limit: 1,
     log: (event, f) => lines.push(`${event} ${JSON.stringify(f)}`),
   });
-  assert.deepEqual(lines, ['provider_error {"job":"a","kind":"throttled"}']);
+  assert.deepEqual(lines, ['detect_fallback {"job":"a","reason":"bad_path"}', 'provider_error {"job":"a","kind":"throttled"}']);
+});
+
+// FM-Q A′-2: temporary detect copy -----------------------------------------------------------------------
+const E = '33333333-3333-4333-8333-333333333333';
+const M = '44444444-4444-4444-8444-444444444444';
+const DETECT = `${ROOM}/${M}/detect/${E}.jpg`;
+const uJob = (attempts = 0): Job => ({ id: 'j1', enrollment_id: E, media_id: M, attempts });
+const PREVIEW = `${ROOM}/${M}/preview.jpg`;
+
+test('A′-2: compares the detect copy, not the preview, and deletes it after a match', async () => {
+  const detect = new Uint8Array(20).fill(1);
+  const store = makeStore({ enrollments: [E], jobs: [uJob()], photos: { [M]: PREVIEW }, objects: { [DETECT]: detect, [PREVIEW]: bytes(5) } });
+  let seen: Uint8Array | null = null;
+  const s = await processBatch(store, fake(async (_r, t) => { seen = t; return { similarity: 99, targetHadFace: true }; }), { limit: 5 });
+  assert.equal(seen, detect);
+  assert.ok(!store.downloads.includes(`room-media:${PREVIEW}`));
+  assert.deepEqual(store.removed, [DETECT]);
+  assert.equal(s.matched, 1);
+});
+
+for (const [name, compare] of [
+  ['no face (bad_image)', async () => { throw new FaceProviderError('bad_image'); }],
+  ['Rekognition error', async () => { throw new FaceProviderError('transient'); }],
+  ['timeout', async () => { throw new FaceProviderError('transient'); }],
+  ['auth abort', async () => { throw new FaceProviderError('auth'); }],
+  ['unexpected exception', async () => { throw new Error('boom'); }],
+  ['no match', async () => ({ similarity: null, targetHadFace: false })],
+] as const) {
+  test(`A′-2: detect copy deleted in finally on ${name}`, async () => {
+    const store = makeStore({ enrollments: [E], jobs: [uJob()], objects: { [DETECT]: bytes(3) } });
+    await processBatch(store, fake(compare as FaceProvider['compare']), { limit: 5 });
+    assert.deepEqual(store.removed, [DETECT]);
+  });
+}
+
+test('A′-2: detect copy deleted when the room closed, the photo is gone, or the rooms differ', async () => {
+  for (const o of [{ access: 'room_closed' as const }, { goneMedia: [M] }, { photoRoom: { [M]: OTHER_ROOM } }]) {
+    const store = makeStore({ enrollments: [E], jobs: [uJob()], objects: { [DETECT]: bytes(3) }, ...o });
+    const p = fake(async () => ({ similarity: 99, targetHadFace: true }));
+    await processBatch(store, p, { limit: 5 });
+    assert.equal(p.calls, 0);
+    assert.deepEqual(store.removed, [DETECT]);
+  }
+});
+
+test('A′-2: a photo from another room than the enrollment fails room_mismatch without any download', async () => {
+  const store = makeStore({ enrollments: [E], jobs: [uJob()], photoRoom: { [M]: OTHER_ROOM }, objects: { [DETECT]: bytes(3) } });
+  await processBatch(store, fake(async () => ({ similarity: 99, targetHadFace: true })), { limit: 5 });
+  assert.deepEqual(store.finished, [{ id: 'j1', status: 'failed', error: 'room_mismatch' }]);
+  assert.ok(!store.downloads.some((d) => d.startsWith('room-media:')));
+});
+
+test('A′-2: only the server-built path is read (the enrollment room, the job media, the job enrollment)', async () => {
+  const otherUserCopy = `${ROOM}/${M}/detect/55555555-5555-4555-8555-555555555555.jpg`;
+  const store = makeStore({ enrollments: [E], jobs: [uJob()], photos: { [M]: PREVIEW }, objects: { [otherUserCopy]: bytes(3), [PREVIEW]: bytes(5) } });
+  await processBatch(store, fake(async () => ({ similarity: 10, targetHadFace: true })), { limit: 5 });
+  assert.deepEqual(store.downloads.filter((d) => d.startsWith('room-media:')), [`room-media:${DETECT}`, `room-media:${PREVIEW}`]);
+  assert.deepEqual(store.removed, [DETECT]); // never another member's copy
+});
+
+test('A′-2: missing or over-5MB detect copy falls back to the preview and logs why', async () => {
+  for (const [objects, reason] of [
+    [{ [PREVIEW]: bytes(5) }, 'missing'],
+    [{ [DETECT]: bytes(5 * 1024 * 1024 + 1), [PREVIEW]: bytes(5) }, 'too_large'],
+  ] as const) {
+    const lines: string[] = [];
+    const store = makeStore({ enrollments: [E], jobs: [uJob()], photos: { [M]: PREVIEW }, objects });
+    let seen = 0;
+    await processBatch(store, fake(async (_r, t) => { seen = t.length; return { similarity: 99, targetHadFace: true }; }), {
+      limit: 5,
+      log: (event, f) => lines.push(`${event} ${JSON.stringify(f)}`),
+    });
+    assert.equal(seen, 5);
+    assert.deepEqual(lines, [`detect_fallback {"job":"j1","reason":"${reason}"}`]);
+  }
+});
+
+test('A′-2: a failed delete is logged without path or error text and does not fail the job', async () => {
+  const lines: string[] = [];
+  const store = makeStore({ enrollments: [E], jobs: [uJob()], objects: { [DETECT]: bytes(3) }, removeFails: true });
+  const s = await processBatch(store, fake(async () => ({ similarity: 99, targetHadFace: true })), {
+    limit: 5,
+    log: (event, f) => lines.push(`${event} ${JSON.stringify(f)}`),
+  });
+  assert.equal(s.done, 1);
+  assert.deepEqual(lines, ['detect_delete_failed {"job":"j1"}']);
+});
+
+test('A′-2: detectObjectPath and staleDetectObjects', () => {
+  assert.equal(detectObjectPath(ROOM, M, E), DETECT);
+  assert.equal(detectObjectPath('../x', M, E), null);
+  assert.equal(detectObjectPath(ROOM, M, 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'), null);
+  assert.ok(isDetectObjectName(DETECT));
+  for (const n of [`${ROOM}/${M}/preview.jpg`, `${ROOM}/${M}/original.jpg`, `${ROOM}/${M}/detect/${E}.png`, `${ROOM}/${M}/detect/x/${E}.jpg`, `x/${DETECT}`]) {
+    assert.ok(!isDetectObjectName(n), n);
+  }
+  const now = new Date('2026-11-07T12:00:00Z');
+  const old = '2026-11-07T11:44:59Z';
+  const fresh = '2026-11-07T11:50:00Z';
+  const picked = staleDetectObjects(
+    [
+      { name: DETECT, createdAt: old },
+      { name: `${ROOM}/${M}/detect/${'6'.repeat(8)}-6666-4666-8666-${'6'.repeat(12)}.jpg`, createdAt: fresh },
+      { name: `${ROOM}/${M}/preview.jpg`, createdAt: old },
+      { name: DETECT.replace(E, '77777777-7777-4777-8777-777777777777'), createdAt: 'garbage' },
+    ],
+    now,
+  );
+  assert.deepEqual(picked.map((o) => o.name), [DETECT]);
+  assert.equal(DETECT_TTL_MS, 15 * 60_000);
+});
+
+test('Rekognition: a timed-out call is transient; a 200 with an unreadable body is transient, not "no match"', async () => {
+  const cfg = { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'x', region: 'us-east-1', similarityThreshold: 80 };
+  const hang: typeof fetch = (_u, init) =>
+    new Promise((_res, rej) => init?.signal?.addEventListener('abort', () => rej(new DOMException('timeout', 'TimeoutError'))));
+  await assert.rejects(createRekognitionProvider({ ...cfg, fetchImpl: hang, timeoutMs: 10 }).compare(bytes(3), bytes(3)), (e) => e instanceof FaceProviderError && e.kind === 'transient');
+  const cut: typeof fetch = async () => new Response('{"FaceMat', { status: 200 });
+  await assert.rejects(createRekognitionProvider({ ...cfg, fetchImpl: cut }).compare(bytes(3), bytes(3)), (e) => e instanceof FaceProviderError && e.kind === 'transient');
 });
 
 test('SigV4 matches the AWS documentation vector (iam ListUsers, 20150830)', async () => {

@@ -1,5 +1,5 @@
 import * as Notifications from 'expo-notifications';
-import { Stack, useRouter } from 'expo-router';
+import { type Href, Stack, useNavigationContainerRef, useRouter } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
 import { useEffect } from 'react';
 
@@ -7,6 +7,8 @@ import { LocationReporters } from '@/components/location-reporters';
 import { en } from '@/i18n/en';
 import { AuthProvider, useAuth } from '@/lib/auth';
 import { reminderRoomFromResponse, setPendingReminderRoom } from '@/lib/expiry-reminders';
+import { hasOpenModal, setRootLinkHandler } from '@/lib/root-link';
+import { pushFromRoot, resetToRoot } from '@/lib/root-nav';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -27,9 +29,26 @@ function RootNavigator() {
     const roomId = reminderRoomFromResponse(response);
     if (!roomId) return;
     Notifications.clearLastNotificationResponse();
-    if (signedIn) router.push({ pathname: '/room/[id]', params: { id: roomId, from: 'reminder' } });
+    // C-3: from the root, so the room is never pushed inside an open Invite/Upgrade modal.
+    if (signedIn) pushFromRoot(router, { pathname: '/room/[id]', params: { id: roomId, from: 'reminder' } });
     else setPendingReminderRoom(roomId);
   }, [response, loading, signedIn, router]);
+
+  // N-1: `moment:///` while signed in pops back to Rooms (or replaces the top screen with it when
+  // Rooms is not in the stack) instead of pushing another Rooms. P-3: with Invite or Upgrade open,
+  // the modal is closed first, and a join link opens from Rooms like a reminder tap (C-3).
+  // Signed out, cold start, or a join link with no modal open: default handling.
+  const navigationRef = useNavigationContainerRef();
+  useEffect(() => {
+    if (loading || !signedIn) return;
+    setRootLinkHandler({
+      isModalOpen: () => navigationRef.isReady() && hasOpenModal(navigationRef.getRootState()),
+      reset: (modalOpen) => resetToRoot(router, '/', modalOpen),
+      // joinLinkHref only returns `/join/<token>`, a typed route.
+      openFromRoot: (href) => pushFromRoot(router, href as Href),
+    });
+    return () => setRootLinkHandler(null);
+  }, [loading, signedIn, router, navigationRef]);
 
   if (loading) return null;
 
@@ -40,6 +59,7 @@ function RootNavigator() {
       <Stack.Protected guard={signedIn} redirectTo="/welcome">
         <Stack.Screen name="index" options={{ title: en.home.title, headerLargeTitle: true }} />
         <Stack.Screen name="profile" options={{ title: en.profile.title }} />
+        {/* Modal screens (upgrade, room/[id]/invite): keep MODAL_ROUTES in lib/root-link.ts in sync (P-3). */}
         <Stack.Screen name="upgrade" options={{ title: en.upgrade.title, presentation: 'modal' }} />
         <Stack.Screen name="plan-preview" options={{ title: en.planPreview.title }} />
         <Stack.Screen name="create-room" options={{ title: en.createRoom.title }} />

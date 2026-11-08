@@ -4,7 +4,7 @@ import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
 import * as VideoThumbnails from 'expo-video-thumbnails';
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { Share } from 'react-native';
 
 import { en } from '@/i18n/en';
@@ -13,6 +13,7 @@ import type { Tables } from './database.types';
 import { errorMessage } from './errors';
 import { EXT_BY_MIME, exportFileName, extensionFor } from './file-name';
 import { clearImageDiskCache } from './image-cache';
+import { loadLatest } from './latest-load';
 import { progressFraction } from './progress';
 import { useRoomEvents } from './room-channel';
 import { supabase, SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL } from './supabase';
@@ -77,7 +78,7 @@ export function authHeaders(accessToken: string): Record<string, string> {
   return { Authorization: `Bearer ${accessToken}`, apikey: SUPABASE_PUBLISHABLE_KEY };
 }
 
-async function freshToken() {
+export async function freshToken() {
   const { data } = await supabase.auth.getSession();
   const token = data.session?.access_token;
   if (!token) throw new Error(en.errors.notSignedIn);
@@ -462,30 +463,44 @@ export function useRoomMedia(roomId: string, filter: MediaFilter, userId: string
   const key = `${roomId}|${filter}|${userId ?? ''}`;
   const [settledKey, setSettledKey] = useState<string | null>(null);
   const loading = settledKey !== key;
+  // G-1: a fetch settles only if its key is still current, so a slow 'all' cannot overwrite 'mine'.
+  const keyRef = useRef(key);
+  useLayoutEffect(() => {
+    keyRef.current = key;
+  }, [key]);
 
   const reload = useCallback(async () => {
-    try {
-      const data = await listMedia(roomId, filter, userId);
-      setItems(data);
-      setError(null);
-    } catch (e) {
-      setError(errorMessage(e));
-    } finally {
-      setSettledKey(`${roomId}|${filter}|${userId ?? ''}`);
-    }
+    const forKey = `${roomId}|${filter}|${userId ?? ''}`;
+    await loadLatest(forKey, () => keyRef.current, () => listMedia(roomId, filter, userId), (outcome) => {
+      if (outcome.ok) {
+        setItems(outcome.data);
+        setError(null);
+      } else {
+        setError(errorMessage(outcome.error));
+      }
+      setSettledKey(forKey);
+    });
   }, [roomId, filter, userId]);
 
   // Initial fetch runs once the room channel settles, so no change between
   // the fetch and the subscription is missed; it still runs if realtime fails.
+  const subscribedRoom = useRef<string | null>(null);
   useRoomEvents(
     roomId,
     (event) => {
       if (event.table === 'media') reload();
     },
     () => {
+      subscribedRoom.current = roomId;
       reload();
     },
   );
+
+  // G-1: a filter (or user) change refetches once this room's channel has settled; before that,
+  // the channel's settle fetch above loads the current key.
+  useEffect(() => {
+    if (subscribedRoom.current === roomId) reload();
+  }, [roomId, reload]);
 
   return { items, loading, error, reload };
 }

@@ -40,7 +40,7 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Moment uses the camera to scan room invite QR codes.",
+          "cameraPermission": "Moment uses the camera to scan room invite QR codes, to take photos for your room, and, only if you turn on face matching, to take your face reference photo.",
           "microphonePermission": false,
           "recordAudioAndroid": false
         }
@@ -50,7 +50,7 @@
         "expo-image-picker",
         {
           "photosPermission": "Moment reads the original photos and videos you choose so they can be shared at full quality in your room.",
-          "cameraPermission": "Moment uses the camera to scan room invite QR codes and to take photos for your room.",
+          "cameraPermission": "Moment uses the camera to scan room invite QR codes, to take photos for your room, and, only if you turn on face matching, to take your face reference photo.",
           "microphonePermission": false
         }
       ],

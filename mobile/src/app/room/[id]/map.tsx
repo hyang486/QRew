@@ -1,9 +1,11 @@
-import { AppleMaps } from 'expo-maps';
+import { AppleMaps, type CameraMoveEvent } from 'expo-maps';
+import { SymbolView } from 'expo-symbols';
 import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 
 import { Avatar } from '@/components/avatar';
+import { RouteEditor } from '@/components/route-editor';
 import { Button, colors, Hint } from '@/components/ui';
 import { en } from '@/i18n/en';
 import { useAuth } from '@/lib/auth';
@@ -24,16 +26,22 @@ import {
 } from '@/lib/location';
 import {
   type Camera,
-  cameraFor,
+  fitRoomCamera,
   formatAge,
   formatSpeedKmh,
   isStale,
+  labelPins,
   type LatLng,
   MAX_CAMERA_ZOOM,
-  MAX_ROUTE_POINTS,
   parseRoute,
   type PinInput,
+  planLabels,
   planPins,
+  ROOM_MAP_SIZE,
+  type Viewport,
+  viewportFromCamera,
+  viewportFromRegion,
+  type ViewSize,
   wantedIconPaths,
 } from '@/lib/location-plan';
 import { useMarkerIcons } from '@/lib/marker-icons';
@@ -49,7 +57,10 @@ type State =
 
 const STALE_TINT = '#8E8E93';
 const ROUTE_COLOR = '#007AFF';
-const DRAFT_COLOR = '#FF9500';
+// P2: the member label pill. Fixed light colors (not the app theme) so it reads the same on light and dark maps.
+const LABEL_BACKGROUND = '#FFFFFF';
+const LABEL_TEXT = '#000000';
+const LABEL_STALE_TEXT = '#6C6C70';
 
 export default function RoomMapScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -152,8 +163,66 @@ function RoomMap({
 
   const presence = useLivePresence(room.id, active);
   const savedRoute = useMemo(() => parseRoute(room.route), [room.route]);
-  const [draft, setDraft] = useState<LatLng[] | null>(null);
-  const shownRoute = draft ?? savedRoute;
+  // R1-C: the host edits the route in a full-screen editor (a Modal outside the stack, with its own map).
+  // Holds where the editor's map opens, captured when it opens; null when not editing.
+  const [editor, setEditor] = useState<{ start: Camera | null } | null>(null);
+  const shownRoute = savedRoute;
+
+  // F5-5b: the map's real size once it is laid out (the fit and the label grouping measure against it).
+  const [mapSize, setMapSize] = useState<ViewSize>(ROOM_MAP_SIZE);
+  // The room map's view after its last camera move: the editor opens on the same view.
+  const lastView = useRef<Camera | null>(null);
+  // P2: what the map showed when its camera last stopped (expo-maps reports a move only at its end), used to
+  // group the member labels on screen. Null until the first move ends.
+  const [viewport, setViewport] = useState<Viewport | null>(null);
+  function onCameraMove(event: CameraMoveEvent) {
+    const { latitude, longitude } = event.coordinates;
+    if (latitude == null || longitude == null) return;
+    lastView.current = { coordinates: { latitude, longitude }, zoom: event.zoom };
+    const next = viewportFromRegion(event, mapSize);
+    // Only a real change re-renders (an equal event must not loop through a new pin layout).
+    setViewport((prev) =>
+      next &&
+      (!prev ||
+        prev.scale !== next.scale ||
+        prev.bearing !== next.bearing ||
+        prev.center.latitude !== next.center.latitude ||
+        prev.center.longitude !== next.center.longitude)
+        ? next
+        : prev,
+    );
+  }
+
+  // M1: a fresh member with a profile photo is an annotation with the photo as its icon (square: expo-maps
+  // draws the icon as a plain 50 pt image and cannot round it). No photo, still loading or a failed load:
+  // an initials marker. Stale: a grey clock marker with no speed (C4), photo or not. Only current members
+  // (`avatars` comes from listMembers) get a photo. P2: the pins have no title (MapKit hid one of two close
+  // titles); the name · speed labels are text annotations, one pill per group of pins that are close on
+  // screen, under the group's lowest pin (planLabels). expo-maps' SwiftUI Map has no tap callout, and pins
+  // and labels have no tap action.
+  const pinInputs: PinInput[] = presence.rows.map((row) => ({
+    userId: row.user_id,
+    coordinates: { latitude: row.lat, longitude: row.lng },
+    updatedAt: row.updated_at,
+    speedMps: row.speed_mps,
+    label: displayName(row, userId, names),
+    initialsOf: names.get(row.user_id) ?? '',
+    avatarPath: avatars.get(row.user_id) ?? null,
+  }));
+  const icons = useMarkerIcons(wantedIconPaths(pinInputs, now), session?.access_token);
+  const pins = planPins(pinInputs, now, icons, en.map.stalePin);
+  const labelInputs = labelPins(pins);
+  const markers = pins.flatMap((pin) =>
+    pin.kind === 'photo'
+      ? []
+      : [
+          {
+            id: pin.id,
+            coordinates: pin.coordinates,
+            ...(pin.kind === 'stale' ? { systemImage: 'clock', tintColor: STALE_TINT } : { monogram: pin.monogram }),
+          },
+        ],
+  );
 
   // M6: with no route or positions yet, the map starts on the user's own position (no prompt).
   const [myPosition, setMyPosition] = useState<LatLng | null>(null);
@@ -172,14 +241,16 @@ function RoomMap({
   // after that only the Recenter button moves the camera. F5-3: the zoom fits the points' span.
   // F5-4: the first centering goes through the cameraPosition prop, which expo-maps applies once the
   // native view exists; an imperative call right after mount could reject ("Unable to find the view").
-  const pointsCamera = useMemo(
-    () => cameraFor([...savedRoute, ...presence.rows.map((r) => ({ latitude: r.lat, longitude: r.lng }))]),
-    [savedRoute, presence.rows],
+  // F5-5b: the fit keeps the points clear of the overlay buttons and of the pins' own icons and labels,
+  // measured against the map's real size once it is laid out.
+  // P2: the fit also leaves room for the member labels it will draw (grouped pills grow downward).
+  // Cheap (a few pins), so it is recomputed on each render rather than memoized on the per-render pin list.
+  const pointsCamera = fitRoomCamera(
+    [...savedRoute, ...presence.rows.map((r) => ({ latitude: r.lat, longitude: r.lng }))],
+    labelInputs,
+    mapSize,
   );
-  const camera = useMemo<Camera | null>(
-    () => pointsCamera ?? (myPosition ? { coordinates: myPosition, zoom: MAX_CAMERA_ZOOM } : null),
-    [pointsCamera, myPosition],
-  );
+  const camera = roomCamera(pointsCamera, myPosition);
   const [initialCamera, setInitialCamera] = useState<Camera | null>(null);
   const centeredOn = useRef<'none' | 'mine' | 'points'>('none');
   useEffect(() => {
@@ -268,51 +339,33 @@ function RoomMap({
     ]);
   }
 
-  function onMapClick(event: { coordinates: { latitude?: number; longitude?: number } }) {
-    const { latitude, longitude } = event.coordinates;
-    if (latitude == null || longitude == null) return;
-    setDraft((d) => (d && d.length < MAX_ROUTE_POINTS ? [...d, { latitude, longitude }] : d));
+  function openEditor() {
+    setEditor({ start: lastView.current ?? camera });
   }
 
-  function saveDraft() {
-    if (!draft) return;
+  function saveEdited(route: LatLng[]) {
     run('route', async () => {
-      await saveRoute(room.id, draft);
-      setDraft(null);
+      await saveRoute(room.id, route);
+      setEditor(null);
     });
   }
 
-  // M1: a fresh member with a profile photo is an annotation with the photo as its icon (square: expo-maps
-  // draws the icon as a plain 50 pt image and cannot round it). No photo, still loading or a failed load:
-  // an initials marker. Stale: a grey clock marker with no speed (C4), photo or not. Only current members
-  // (`avatars` comes from listMembers) get a photo. The title (name · speed) is the label always drawn under the pin;
-  // expo-maps' SwiftUI Map has no tap callout, and pins have no tap action.
-  const pinInputs: PinInput[] = presence.rows.map((row) => ({
-    userId: row.user_id,
-    coordinates: { latitude: row.lat, longitude: row.lng },
-    updatedAt: row.updated_at,
-    speedMps: row.speed_mps,
-    label: displayName(row, userId, names),
-    initialsOf: names.get(row.user_id) ?? '',
-    avatarPath: avatars.get(row.user_id) ?? null,
-  }));
-  const icons = useMarkerIcons(wantedIconPaths(pinInputs, now), session?.access_token);
-  const pins = planPins(pinInputs, now, icons, en.map.stalePin);
-  const markers = pins.flatMap((pin) =>
-    pin.kind === 'photo'
-      ? []
-      : [
-          {
-            id: pin.id,
-            coordinates: pin.coordinates,
-            title: pin.title,
-            ...(pin.kind === 'stale' ? { systemImage: 'clock', tintColor: STALE_TINT } : { monogram: pin.monogram }),
-          },
-        ],
-  );
-  const annotations = pins.flatMap((pin) =>
-    pin.kind === 'photo' ? [{ id: pin.id, coordinates: pin.coordinates, title: pin.title, icon: pin.icon }] : [],
-  );
+  // P2: grouped on the last camera the map stopped at; before the first camera event, on the camera it was
+  // given (or will be given by Recenter), so the first frame already groups.
+  const givenCamera = initialCamera ?? camera;
+  const labelView = viewport ?? (givenCamera ? viewportFromCamera(givenCamera, mapSize) : null);
+  const labels = planLabels(labelInputs, labelView, mapSize);
+  const annotations = [
+    ...pins.flatMap((pin) => (pin.kind === 'photo' ? [{ id: pin.id, coordinates: pin.coordinates, icon: pin.icon }] : [])),
+    ...labels.map((label) => ({
+      id: label.id,
+      coordinates: label.coordinates,
+      text: label.text,
+      anchor: label.anchor,
+      backgroundColor: LABEL_BACKGROUND,
+      textColor: label.stale ? LABEL_STALE_TEXT : LABEL_TEXT,
+    })),
+  ];
 
   const reporterText = en.map.reporter[sharingState];
   const reporterIsError = sharingState === 'error' || sharingState === 'no-permission' || sharingState === 'refused';
@@ -325,7 +378,15 @@ function RoomMap({
     >
       <Stack.Screen options={{ title: en.map.title }} />
 
-      <View style={styles.mapWrap}>
+      <View
+        style={styles.mapWrap}
+        onLayout={(e) => {
+          const { width, height } = e.nativeEvent.layout;
+          if (width > 0 && height > 0 && (width !== mapSize.width || height !== mapSize.height)) {
+            setMapSize({ width, height });
+          }
+        }}
+      >
         <AppleMaps.View
           ref={mapRef}
           style={styles.map}
@@ -334,24 +395,35 @@ function RoomMap({
           annotations={annotations}
           polylines={
             shownRoute.length > 1
-              ? [{ id: 'route', coordinates: shownRoute, color: draft ? DRAFT_COLOR : ROUTE_COLOR, width: 4 }]
+              ? [{ id: 'route', coordinates: shownRoute, color: ROUTE_COLOR, width: 4 }]
               : []
           }
           properties={{ isMyLocationEnabled: granted === true && (my.share || showingMine) }}
-          onMapClick={draft ? onMapClick : undefined}
+          onCameraMove={onCameraMove}
         />
         <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={en.map.showMine}
-          accessibilityState={{ busy: locate === 'busy' }}
-          onPress={showMyLocation}
-          style={[styles.overlayButton, styles.showMine]}
-        >
-          <Text style={styles.link}>{locate === 'busy' ? en.map.locating : en.map.showMine}</Text>
-        </Pressable>
-        {camera ? (
-          <Pressable accessibilityRole="button" onPress={recenter} style={[styles.overlayButton, styles.recenter]}>
-            <Text style={styles.link}>{en.map.recenter}</Text>
+              accessibilityRole="button"
+              accessibilityLabel={en.map.showMine}
+              accessibilityState={{ busy: locate === 'busy' }}
+              onPress={showMyLocation}
+              style={[styles.overlayButton, styles.showMine]}
+            >
+              <Text style={styles.link}>{locate === 'busy' ? en.map.locating : en.map.showMine}</Text>
+            </Pressable>
+            {camera ? (
+              <Pressable accessibilityRole="button" onPress={recenter} style={[styles.overlayButton, styles.recenter]}>
+                <Text style={styles.link}>{en.map.recenter}</Text>
+              </Pressable>
+            ) : null}
+        {isHost ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={en.map.pen}
+            onPress={openEditor}
+            style={[styles.overlayButton, styles.pen]}
+          >
+            <SymbolView name="pencil.tip" size={18} tintColor={colors.tint} />
+            <Text style={styles.link}>{en.map.pen}</Text>
           </Pressable>
         ) : null}
       </View>
@@ -436,29 +508,30 @@ function RoomMap({
 
       <View style={styles.group}>
         <Text style={styles.status}>{en.map.route}</Text>
-        {isHost && draft ? (
-          <>
-            <Hint>{en.map.drawHint}</Hint>
-            {draft.length >= MAX_ROUTE_POINTS ? <Hint tone="error">{en.map.routeTooLong(MAX_ROUTE_POINTS)}</Hint> : null}
-            <View style={styles.row}>
-              <Pressable accessibilityRole="button" onPress={() => setDraft((d) => (d ? d.slice(0, -1) : d))}>
-                <Text style={styles.link}>{en.map.undo}</Text>
-              </Pressable>
-              <Pressable accessibilityRole="button" onPress={() => setDraft([])}>
-                <Text style={styles.link}>{en.map.clear}</Text>
-              </Pressable>
-              <Pressable accessibilityRole="button" onPress={() => setDraft(null)}>
-                <Text style={styles.link}>{en.map.cancel}</Text>
-              </Pressable>
-            </View>
-            <Button title={en.map.save} busy={busy === 'route'} onPress={saveDraft} />
-          </>
-        ) : isHost ? (
-          <Button title={en.map.drawRoute} variant="secondary" onPress={() => setDraft(savedRoute)} />
+        {isHost ? (
+          <Button
+            title={savedRoute.length > 0 ? en.map.editRoute : en.map.drawRoute}
+            variant="secondary"
+            onPress={openEditor}
+          />
         ) : null}
       </View>
+      {editor ? (
+        <RouteEditor
+          savedRoute={savedRoute}
+          startCamera={editor.start}
+          saving={busy === 'route'}
+          onCancel={() => setEditor(null)}
+          onSave={saveEdited}
+        />
+      ) : null}
     </ScrollView>
   );
+}
+
+/** The fitted camera, or until there are points, street level on the user's own position. */
+function roomCamera(pointsCamera: Camera | null, myPosition: LatLng | null): Camera | null {
+  return pointsCamera ?? (myPosition ? { coordinates: myPosition, zoom: MAX_CAMERA_ZOOM } : null);
 }
 
 function displayName(row: Presence, userId: string | undefined, names: Map<string, string>) {
@@ -512,9 +585,11 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   showMine: { left: 8 },
+  // Top left: MapKit's own controls (compass, pitch toggle, user location button) stack in the top right
+  // corner, and expo-maps 58 cannot move them. The scale bar (top left) is off by default.
+  pen: { top: 8, bottom: undefined, left: 8, flexDirection: 'row', alignItems: 'center', gap: 6 },
   recenter: { right: 8 },
   group: { gap: 8 },
-  row: { flexDirection: 'row', gap: 20 },
   status: { fontSize: 17, fontWeight: '600', color: colors.label },
   switchRow: {
     flexDirection: 'row',

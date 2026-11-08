@@ -10,7 +10,11 @@ export type RekognitionConfig = {
   /** Injected for tests. Defaults to global fetch. */
   fetchImpl?: typeof fetch;
   now?: () => Date;
+  /** Per-call limit; a timed-out call is 'transient' (retried), so the caller's cleanup still runs. */
+  timeoutMs?: number;
 };
+
+export const REKOGNITION_TIMEOUT_MS = 20_000;
 
 function toBase64(bytes: Uint8Array): string {
   let s = '';
@@ -61,15 +65,17 @@ export function createRekognitionProvider(cfg: RekognitionConfig): FaceProvider 
       });
       let res: Response;
       try {
-        res = await doFetch(`https://${host}/`, { method: 'POST', headers: signed.headers, body });
+        res = await doFetch(`https://${host}/`, { method: 'POST', headers: signed.headers, body, signal: AbortSignal.timeout(cfg.timeoutMs ?? REKOGNITION_TIMEOUT_MS) });
       } catch {
-        throw new FaceProviderError('transient');
+        throw new FaceProviderError('transient'); // network error or timeout
       }
       let json: { FaceMatches?: { Similarity?: number }[]; UnmatchedFaces?: unknown[]; __type?: string; message?: string; Message?: string } = {};
       try {
         json = await res.json();
       } catch {
-        // fall through with empty body
+        // A success without a readable body (for example cut off by the timeout) must not become "no match".
+        if (res.ok) throw new FaceProviderError('transient');
+        // An error without a body falls through and is classified by status.
       }
       if (!res.ok) throw classifyAwsError(res.status, json.__type, json.message ?? json.Message);
       const sims = (json.FaceMatches ?? []).map((m) => m.Similarity ?? 0);

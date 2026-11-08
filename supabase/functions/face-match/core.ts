@@ -1,4 +1,5 @@
-import { FaceProviderError, type FaceProvider } from './provider.ts';
+import { detectObjectPath } from '../_shared/detect.ts';
+import { FaceProviderError, MAX_IMAGE_BYTES, type FaceProvider } from './provider.ts';
 
 export const MAX_ATTEMPTS = 3;
 /** Estimate threshold for "this photo probably contains you". Tune with real test photos. */
@@ -10,16 +11,21 @@ export interface FaceStore {
   /** Atomically moves up to `limit` queued jobs to running and returns them. */
   claimJobs(limit: number): Promise<Job[]>;
   /** Null when the enrollment no longer exists (member left, room ended, re-enrolled). */
-  getEnrollment(id: string): Promise<{ id: string; ref_path: string } | null>;
+  getEnrollment(id: string): Promise<{ id: string; ref_path: string; room_id: string } | null>;
   /**
    * Live access check for the enrollment's room and member, read at call time:
    * 'ok' only if the room is not deleted, has not expired, and the member row still exists.
    * An expired room keeps its rows until the janitor runs, so existence alone is not enough.
    */
   enrollmentAccess(enrollmentId: string): Promise<'ok' | 'room_closed' | 'not_member'>;
-  /** Path of the image to compare (preview if present, else original). Null if the photo is gone or not ready. */
-  getPhotoPath(mediaId: string): Promise<string | null>;
+  /**
+   * The photo's room and its fallback image (preview if present, else original). Null if the photo is gone,
+   * not ready, or not a photo.
+   */
+  getPhoto(mediaId: string): Promise<{ room_id: string; fallback_path: string } | null>;
   download(bucket: 'face-refs' | 'room-media', path: string): Promise<Uint8Array | null>;
+  /** Deletes one object through the Storage API. Missing objects are not an error. */
+  removeObject(bucket: 'room-media', path: string): Promise<void>;
   /** Writes the result only if the enrollment still exists. 'stale' means it was dropped. */
   saveMatch(enrollmentId: string, mediaId: string, r: { similarity: number | null; matched: boolean }): Promise<'saved' | 'stale'>;
   finishJob(jobId: string, status: 'done' | 'failed' | 'queued', error: string | null): Promise<void>;
@@ -52,24 +58,53 @@ export async function processBatch(
       log('stale_before_call', { job: job.id });
       continue; // the job row cascades away with its enrollment
     }
-    const photoPath = await store.getPhotoPath(job.media_id);
-    if (!photoPath) {
-      await store.finishJob(job.id, 'failed', 'photo_unavailable');
-      s.failed++;
-      continue;
+    // FM-Q A′-2: the only detect path read for this job, built from the job's own rows (never from the caller).
+    const detectPath = detectObjectPath(enrollment.room_id, job.media_id, enrollment.id);
+    try {
+      const photo = await store.getPhoto(job.media_id);
+      if (!photo) {
+        await store.finishJob(job.id, 'failed', 'photo_unavailable');
+        s.failed++;
+      } else if (photo.room_id !== enrollment.room_id) {
+        // A photo from another room than the enrollment's is refused outright.
+        await store.finishJob(job.id, 'failed', 'room_mismatch');
+        s.failed++;
+        log('room_mismatch', { job: job.id });
+      } else {
+        await runJob(job, enrollment, photo.fallback_path, detectPath);
+      }
+    } finally {
+      // Lifetime of the detect copy ends here on every path: match, no face, provider error, timeout
+      // (the provider maps its fetch timeout to 'transient'), stale or closed room. The janitor TTL
+      // covers a crash of the function itself.
+      if (detectPath) {
+        try {
+          await store.removeObject('room-media', detectPath);
+        } catch {
+          log('detect_delete_failed', { job: job.id }); // no path or error text
+        }
+      }
     }
+  }
+  return s;
+
+  async function runJob(job: Job, enrollment: { id: string; ref_path: string }, fallbackPath: string, detectPath: string | null) {
     if (!refCache.has(enrollment.id)) refCache.set(enrollment.id, await store.download('face-refs', enrollment.ref_path));
     const ref = refCache.get(enrollment.id);
-    const target = await store.download('room-media', photoPath);
+    let target = detectPath ? await store.download('room-media', detectPath) : null;
+    if (!target || target.length > MAX_IMAGE_BYTES) {
+      log('detect_fallback', { job: job.id, reason: !detectPath ? 'bad_path' : !target ? 'missing' : 'too_large' });
+      target = await store.download('room-media', fallbackPath);
+    }
     if (!ref) {
       await store.finishJob(job.id, 'failed', 'reference_missing');
       s.failed++;
-      continue;
+      return;
     }
     if (!target) {
       await store.finishJob(job.id, 'failed', 'photo_unavailable');
       s.failed++;
-      continue;
+      return;
     }
 
     // Late-result guard, part 1b: re-check access immediately before the paid, external call.
@@ -78,7 +113,7 @@ export async function processBatch(
       s.stale++;
       log('not_eligible', { job: job.id, access });
       if (access === 'room_closed') await store.finishJob(job.id, 'failed', 'room_closed');
-      continue; // not_member: the enrollment cascade removes the job
+      return; // not_member: the enrollment cascade removes the job
     }
 
     try {
@@ -90,7 +125,7 @@ export async function processBatch(
       if (saved === 'stale') {
         s.stale++;
         log('stale_on_save', { job: job.id });
-        continue;
+        return;
       }
       await store.finishJob(job.id, 'done', null);
       s.done++;
@@ -122,5 +157,4 @@ export async function processBatch(
       }
     }
   }
-  return s;
 }

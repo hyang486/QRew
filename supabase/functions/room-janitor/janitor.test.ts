@@ -23,6 +23,7 @@ function makeStore(init: { objects: Record<string, StoredObject[]>; jobs: Cleanu
     finishCleanup: async (id, r) => { finished[id] = r; },
     activeFaceRefPaths: async () => new Set(init.active ?? []),
     listAllObjects: async (b) => objs[b] ?? [],
+    listDetectObjects: async () => (objs['room-media'] ?? []).filter((x) => x.name.includes('/detect/')),
   };
   return store;
 }
@@ -70,6 +71,8 @@ test('storage failure keeps the job unverified and logs no error text', async ()
   assert.ok(lines.every((l) => !l.includes('secret')));
 });
 
+// FG-R1: this sweep is also the cleanup for a reference uploaded before a failed enroll_face
+// (the client does not delete it; see enrollFace in mobile/src/lib/face.ts).
 test('orphan sweep: unreferenced face-refs older than 1h are removed, fresh uploads and active refs are kept', async () => {
   const store = makeStore({
     objects: { 'face-refs': [o('r/u/orphan-old.jpg', 90), o('r/u/fresh-upload.jpg', 10), o('r/u/active.jpg', 500)] },
@@ -90,4 +93,36 @@ test('J1: a job failing for the 5th time is counted stuck and logged without pat
   assert.equal(s.jobsVerified, 1); // the newer empty job still ran in the same pass
   assert.ok(logs.some((l) => l.startsWith('cleanup_stuck')));
   assert.ok(logs.every((l) => !l.includes('r1/') && !l.includes('secret')));
+});
+
+// FM-Q A′-2 detect copies -------------------------------------------------------------------------------
+const R = '11111111-1111-4111-8111-111111111111';
+const M = '44444444-4444-4444-8444-444444444444';
+const det = (e: string) => `${R}/${M}/detect/${e}.jpg`;
+const E1 = '33333333-3333-4333-8333-333333333333';
+const E2 = '55555555-5555-4555-8555-555555555555';
+
+test('A′-2: TTL sweep removes only detect copies older than 15 minutes; previews and originals stay', async () => {
+  const store = makeStore({
+    objects: { 'room-media': [o(det(E1), 16), o(det(E2), 5), o(`${R}/${M}/preview.jpg`, 60), o(`${R}/${M}/original.heic`, 60)] },
+    jobs: [],
+  });
+  const s = await runJanitor(store, { now: NOW, roomLimit: 10, jobLimit: 10 });
+  assert.equal(s.detectRemoved, 1);
+  assert.deepEqual(store.objs['room-media'].map((x) => x.name), [det(E2), `${R}/${M}/preview.jpg`, `${R}/${M}/original.heic`]);
+});
+
+test('A′-2: the room purge prefix job removes fresh detect copies too', async () => {
+  const store = makeStore({ objects: { 'room-media': [o(det(E2), 1), o(`${R}/${M}/preview.jpg`, 60)] }, jobs: [job('j', 'room-media', `${R}/`, 0)] });
+  const s = await runJanitor(store, { now: NOW, roomLimit: 10, jobLimit: 10 });
+  assert.deepEqual(store.objs['room-media'], []);
+  assert.equal(s.jobsVerified, 1);
+});
+
+test('A′-2: a failing detect sweep is logged without paths and does not fail the run', async () => {
+  const logs: string[] = [];
+  const store = makeStore({ objects: { 'room-media': [o(det(E1), 30)] }, jobs: [], failRemove: true });
+  const s = await runJanitor(store, { now: NOW, roomLimit: 10, jobLimit: 10, log: (e, f) => logs.push(e + JSON.stringify(f)) });
+  assert.equal(s.detectRemoved, 0);
+  assert.deepEqual(logs, ['detect_sweep_error{}']);
 });
