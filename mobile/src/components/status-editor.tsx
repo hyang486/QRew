@@ -25,8 +25,10 @@ function problemText(result: Extract<StatusLabelsResult, { ok: false }>): string
 /**
  * The room's status list (Room info). The host edits the non-Emergency statuses through
  * set_status_definitions; other members see the list read-only. Emergency is always shown and fixed.
+ * Qrew unit 5 (Q 03.03): the host sees the read-only list too until `editing` (Edit status options); the
+ * draft rows stay while the editor is closed, so closing it never drops unsaved edits.
  */
-export function StatusEditor({ roomId, isHost }: { roomId: string; isHost: boolean }) {
+export function StatusEditor({ roomId, isHost, editing = true }: { roomId: string; isHost: boolean; editing?: boolean }) {
   const nextKey = useRef(0);
   const [saved, setSaved] = useState<string[] | null>(null);
   const [rows, setRows] = useState<Row[]>([]);
@@ -128,6 +130,28 @@ export function StatusEditor({ roomId, isHost }: { roomId: string; isHost: boole
     ]);
   }
 
+  if (!isHost || !editing) {
+    return (
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle} accessibilityRole="header">
+          {en.room.statusOptions}
+        </Text>
+        <View>
+          {saved.map((label) => (
+            <Text key={label} style={styles.line}>
+              {label}
+            </Text>
+          ))}
+          <View style={styles.lineRow}>
+            <Text style={styles.lineDanger}>Emergency</Text>
+            <Text style={styles.fixedTag}>{en.statusEditor.emergencyFixed}</Text>
+          </View>
+        </View>
+        {!isHost ? <Hint>{en.statusEditor.memberHint}</Hint> : null}
+      </View>
+    );
+  }
+
   return (
     <View style={styles.section}>
       <Text style={styles.sectionTitle}>{en.statusEditor.title}</Text>
@@ -198,6 +222,22 @@ export function StatusEditor({ roomId, isHost }: { roomId: string; isHost: boole
 const styles = StyleSheet.create({
   section: { gap: 8 },
   sectionTitle: { fontSize: 13, color: colors.secondaryLabel, textTransform: 'uppercase' },
+  // Q 03.03: plain lines with a hairline under each.
+  line: {
+    fontSize: 15,
+    color: colors.label,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.separator,
+  },
+  lineRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: colors.separator,
+  },
+  lineDanger: { flex: 1, fontSize: 15, color: colors.danger, paddingVertical: 10 },
   row: {
     flexDirection: 'row',
     alignItems: 'center',

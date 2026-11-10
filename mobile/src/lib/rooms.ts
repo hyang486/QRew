@@ -3,6 +3,8 @@ import type { PostgrestError } from '@supabase/supabase-js';
 import { en } from '@/i18n/en';
 
 import type { Database, Tables } from './database.types';
+import type { Invite } from './invite';
+import { placeTimeArgs, type LatLng } from './place-time';
 import { verifyAccount } from './auth';
 import { supabase } from './supabase';
 
@@ -17,32 +19,7 @@ export const ROOM_TYPES: RoomType[] = ['sports', 'event', 'waiting', 'general'];
 export const MAX_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 export { REMINDER_WINDOW_MS } from './expiry-plan';
 
-export type Invite = { code: string } | { token: string };
-
-const CODE_RE = /^[0-9]{5}$/;
-const TOKEN_RE = /^[0-9a-f]{36}$/;
-
-export function isValidCode(code: string) {
-  return CODE_RE.test(code);
-}
-
-export function isValidToken(token: string) {
-  return TOKEN_RE.test(token);
-}
-
-/** The URL encoded in the invite QR. Expo Router maps it to `src/app/join/[token].tsx`. */
-export function inviteUrl(token: string) {
-  return `moment://join/${token}`;
-}
-
-/** Reads an invite from a scanned QR payload. Returns null for anything that is not our invite. */
-export function parseInvite(data: string): Invite | null {
-  const text = data.trim();
-  const match = /^moment:\/\/join\/([0-9a-f]+)$/i.exec(text);
-  if (match && isValidToken(match[1].toLowerCase())) return { token: match[1].toLowerCase() };
-  if (isValidCode(text)) return { code: text };
-  return null;
-}
+export { inviteUrl, isValidCode, isValidToken, parseInvite, type Invite } from './invite';
 
 function inviteArgs(invite: Invite) {
   return 'code' in invite ? { p_code: invite.code } : { p_token: invite.token };
@@ -92,6 +69,10 @@ export async function createRoom(input: {
   expiresAt: Date;
   locationAllowed: boolean;
   statuses: string[];
+  /** Optional (0026). Empty name, no pin and no start time → the same call as before. */
+  placeName?: string;
+  pin?: LatLng | null;
+  startsAt?: Date | null;
 }): Promise<Room> {
   const { data, error } = await supabase.rpc('create_room', {
     p_name: input.name,
@@ -99,6 +80,7 @@ export async function createRoom(input: {
     p_expires_at: input.expiresAt.toISOString(),
     p_location_allowed: input.locationAllowed,
     p_statuses: input.statuses,
+    ...placeTimeArgs({ placeName: input.placeName ?? '', pin: input.pin ?? null, startsAt: input.startsAt ?? null }),
   });
   if (error) throw error;
   return data;
@@ -116,6 +98,20 @@ export async function getRoom(roomId: string): Promise<Room | null> {
   const { data, error } = await supabase.from('rooms').select('*').eq('id', roomId).maybeSingle();
   if (error) throw error;
   return data;
+}
+
+/**
+ * Who marked Arrived in the room's current activity (Room info, Q 03.03). A plain read under the existing
+ * arrivals_select policy (room members only); rows are per activity_seq, as mark_arrived writes them.
+ */
+export async function listArrivedIds(roomId: string, activitySeq: number): Promise<string[]> {
+  const { data, error } = await supabase
+    .from('arrivals')
+    .select('user_id')
+    .eq('room_id', roomId)
+    .eq('activity_seq', activitySeq);
+  if (error) throw error;
+  return data.map((r) => r.user_id);
 }
 
 export async function listMembers(roomId: string): Promise<RoomMember[]> {

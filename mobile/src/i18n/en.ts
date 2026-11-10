@@ -1,18 +1,17 @@
 // UI copy is kept here so it can be translated later. English is the default.
 export const en = {
-  appName: 'Moment',
+  appName: 'Qrew',
   welcome: {
-    tagline: 'Temporary rooms for the people you are with right now.',
-    joinAsGuest: 'Continue as guest',
-    guestHint: 'Join a room with a QR or code. No sign-up needed.',
-    hostSignIn: 'Host: Log in',
-    hostSignUp: 'Host: Sign up',
+    // Q 01.01
+    tagline: "A room for the people you're with.",
+    join: 'Join a room',
+    create: 'Create a room',
   },
+  // Q 02.01
   guest: {
-    title: 'Continue as guest',
-    nameLabel: 'Your name',
-    namePlaceholder: 'How others in the room see you',
-    submit: 'Continue',
+    title: "What's your name?",
+    who: 'Only the people in your rooms can see it.\nYou can join without creating an account.',
+    submit: 'Join as guest',
   },
   signIn: {
     title: 'Host log in',
@@ -29,8 +28,16 @@ export const en = {
     hint: 'Add an email and password to this guest profile. Your rooms stay as they are.',
     submit: 'Create host account',
   },
+  // Q 01.02 (log in) and 07.02 (sign up, guest upgrade).
+  hostAccount: {
+    loginTitle: 'Host login',
+    loginSubtitle: 'Pick up where you left off.',
+    newTitle: 'Become a host',
+    newSubtitle: 'Create rooms and invite your group.',
+    createAccount: 'New here? Create an account',
+  },
   fields: {
-    email: 'Email',
+    email: 'Email address',
     password: 'Password',
     passwordHint: 'At least 6 characters',
     name: 'Display name',
@@ -40,9 +47,10 @@ export const en = {
     empty: 'No rooms yet.',
     emptyHintHost: 'Create a room, or join one with a QR or 5-digit code.',
     emptyHintGuest: 'Join a room with a QR or 5-digit code.',
-    signedInAs: (name: string, kind: string) => `Signed in as ${name} (${kind})`,
+    signedInAs: (name: string, kind: string) => `Signed in as ${name} · ${kind}`,
+    yourRooms: 'Your rooms',
     profile: 'Profile',
-    create: 'Create room',
+    create: 'Create a room',
     join: 'Join a room',
     guestCreateHint: 'Only hosts can create rooms.',
     loading: 'Loading rooms',
@@ -65,8 +73,8 @@ export const en = {
     title: 'New room',
     nameLabel: 'Room name',
     namePlaceholder: 'Sunset Run',
-    typeLabel: 'Type',
-    expiryLabel: 'Room ends after',
+    typeLabel: 'Room type',
+    expiryLabel: 'Room closes after',
     expiryHint: (when: string) => `Everything in the room is deleted at ${when}.`,
     expiryOptions: [
       { label: '3 hours', hours: 3 },
@@ -77,41 +85,84 @@ export const en = {
     ],
     locationLabel: 'Allow location sharing',
     locationHint: 'Members still choose for themselves. Sharing starts only after you start the activity.',
-    statusesLabel: 'Statuses (comma separated)',
+    statusesLabel: 'Status options',
     statusesDefault: 'Resting, Giving up, Need water, Need help',
-    statusesHint: 'Emergency is always included.',
+    statusesHint: 'Separate with commas. Emergency is always included.',
     submit: 'Create room',
     nameRequired: 'Enter a room name.',
+    // Place and time unit (0026): optional meeting place and start time.
+    placeTimeLabel: 'Meeting place and time (optional)',
+    placeLabel: 'Meeting place',
+    placePlaceholder: 'North Gate, Golden Gate Park',
+    findOnMap: 'Find on map',
+    finding: 'Finding…',
+    notFound: 'No match on the map. The place name still works without a pin.',
+    findFailed: "Couldn't search the map. The place name still works without a pin.",
+    pinHint: 'Tap the map to move the pin.',
+    removePin: 'Remove pin',
+    addStartTime: 'Add start time',
+    startTimeLabel: 'Starts',
+    removeStartTime: 'Remove start time',
+    startAfterClose: 'The start time must be before the room closes.',
+    startTooEarly: 'The start time is too far in the past.',
+    startMoved: 'The start time moved to fit the new room length.',
   },
+  // Q 02.03
   join: {
-    title: 'Join a room',
-    codeLabel: '5-digit code',
-    codePlaceholder: '12345',
-    submit: 'Continue',
+    title: 'Find your room',
+    subtitle: 'Enter the five-digit code from your host.',
+    codeLabel: '5-digit room code',
+    submit: 'See room',
     scan: 'Scan QR code',
+    qrNoteTitle: 'At the meetup already?',
+    qrNoteBody: 'Ask your host for the QR code.',
     codeInvalid: 'Enter the 5 digits from the host.',
   },
+  // Q 08.01
   scan: {
-    title: 'Scan QR code',
-    permissionHint: 'Moment uses the camera only to read the room QR code.',
+    title: 'Scan an invite',
+    subtitle: "Point the camera at your host's QR code.",
+    enterCode: 'Enter code instead',
+    permissionHint: 'Qrew uses the camera only to read the room QR code.',
     allow: 'Allow camera',
     openSettings: 'Open Settings',
-    notInvite: 'That QR code is not a Moment invite.',
+    notInvite: 'That QR code is not a Qrew invite.',
   },
   preview: {
     title: 'Join room',
     members: (count: number, max: number) => `${count} of ${max} members`,
     endsAt: (when: string) => `Ends ${when}`,
     endsSoon: 'This room ends within 24 hours. Photos and files are deleted when it ends.',
-    join: 'Join room',
+    join: 'Join the room',
     open: 'Open room',
     alreadyMember: 'You are already in this room.',
+    // Q 07.03
+    unavailableTitle: 'Invite unavailable',
+    enterCode: 'Enter a room code',
+  },
+  // Place and time unit (Q 01.04): map, place + Open in Maps, date and time. Shown only when set.
+  placeTime: {
+    mapCaption: 'Meeting point preview',
+    openInMaps: 'Open in Maps',
+    // Q 08.02
+    sheetTitle: 'Open meeting location',
+    openApple: 'Open in Apple Maps',
+    openGoogle: 'Open in Google Maps',
+    cancel: 'Cancel',
+    localTime: 'Local time',
+    starts: (when: string) => `Starts ${when}`,
   },
   room: {
     invite: 'Invite',
     endsIn: (remaining: string) => `Ends in ${remaining}`,
     endsAt: (when: string) => `Ends ${when}`,
+    // Qrew unit 3 (Q 03.01): "Ends today at 10:00 PM" under the room name in chat.
+    endsOn: (day: 'today' | 'tomorrow' | 'later', date: string, time: string) =>
+      day === 'today' ? `Ends today at ${time}` : day === 'tomorrow' ? `Ends tomorrow at ${time}` : `Ends ${date} at ${time}`,
     reminderTitle: 'Room ends soon',
+    // #9: one compact line in chat; the full note is in Info.
+    endsSoonLine: 'Room ends soon · photos and files are deleted',
+    endsSoonInfo: "Photos, files and chat are deleted when the room ends. Download anything you'd like to keep.",
     reminderBody: (name: string, remaining: string) =>
       `${name} disappears in ${remaining}. Download any photos and files you'd like to keep.`,
     members: 'Members',
@@ -123,14 +174,25 @@ export const en = {
     leaveConfirmTitle: 'Leave this room?',
     leaveConfirmBody: 'You will lose access to its chat and photos. You can rejoin with the invite while the room is open.',
     end: 'End room for everyone',
-    endConfirmTitle: 'End this room now?',
-    endConfirmBody: 'Everyone loses access immediately, and the room’s messages, photos, and files are deleted.',
+    // Qrew unit 5 (Q 03.03): Room info cards.
+    infoSubtitle: (isHost: boolean) => (isHost ? 'Room info · Host' : 'Room info'),
+    people: (n: number) => (n === 1 ? '1 person' : `${n} people`),
+    arrived: (n: number) => `${n} arrived`,
+    viewParticipants: 'View participants',
+    hideParticipants: 'Hide participants',
+    statusOptions: 'Status options',
+    editStatusOptions: 'Edit status options',
+    doneEditingStatus: 'Done editing statuses',
     cancel: 'Cancel',
     gone: 'This room has ended.',
     goneHint: 'It expired, was ended by the host, or you left it.',
     reminderGoneHint:
       'The room from your reminder has ended. Its messages, photos, and files were deleted from the server. Anything you already saved to your device is still there.',
     backToRooms: 'Back to rooms',
+    // Qrew unit 5 (Q 06.04): the shared ended screen. closedAt only when the client knows the time (lib/room-ended).
+    endedTitle: 'This room has ended',
+    closedAt: (name: string, when: string) => `${name} closed at ${when}.`,
+    savedStay: 'Saved originals stay on your device.',
   },
   statusEditor: {
     title: 'Statuses',
@@ -179,9 +241,18 @@ export const en = {
     stopBody: 'Your reference photo and all results for this room are deleted from the server.',
     stopConfirm: 'Stop and remove',
     cancel: 'Cancel',
-    setUp: 'Set up',
+    setUp: 'Set up photos of me',
     manage: 'Manage',
-    intro: 'Find the photos you appear in. Optional, and only for this room.',
+    // Qrew unit 5 (Q 06.01): the Me filter before setup.
+    intro: 'Find your photos in this room.',
+    introMeta: 'Optional · One reference photo',
+    // Qrew unit 5 (Q 06.02): the review screen. The consent points above stay in full on it (not Q's short text).
+    reviewTitle: 'Review your reference',
+    reviewSubtitle: 'Check that your face is clearly visible.',
+    pickPhoto: 'Choose a photo',
+    chooseAnother: 'Choose another',
+    pickPhotoHint: 'Takes or chooses a photo of your face',
+    noPhotoYet: 'No photo chosen yet',
     disabled:
       'Face matching is off in this draft. Your reference is saved; photos are sorted when face matching is turned on.',
     runError: (message: string) => `Photos could not be checked: ${message}`,
@@ -198,9 +269,16 @@ export const en = {
   reminder: {
     title: 'Room ends in 24 hours',
     body: (name: string) => `${name} disappears tomorrow. Download any photos and files you'd like to keep.`,
+    // G6b: rooms under 24 h are reminded in their last hour.
+    titleLastHour: 'Room ends in 1 hour',
+    bodyLastHour: (name: string) => `${name} disappears in 1 hour. Download any photos and files you'd like to keep.`,
   },
   chat: {
-    placeholder: 'Message',
+    // Qrew unit 3 (Q 03.01): nav title and the room's tab row.
+    title: 'Chat',
+    tabs: 'Room sections',
+    tabChat: 'Chat',
+    placeholder: 'Message the room',
     send: 'Send',
     empty: 'No messages yet. Say hello.',
     loadError: 'Messages could not be loaded.',
@@ -210,6 +288,11 @@ export const en = {
     retry: 'Retry',
     discard: 'Delete',
     formerMember: 'Former member',
+    you: 'You',
+    // #8: the uploader's line; `body` is the stored "shared 3 photos".
+    shared: (who: string, body: string) => `${who} ${body}`,
+    sharedFallback: 'shared a photo or file',
+    openPhotosHint: 'Opens Photos',
   },
   media: {
     title: 'Photos & files',
@@ -218,9 +301,18 @@ export const en = {
     mine: 'Mine',
     others: 'Others',
     add: 'Add',
+    addTakePhoto: 'Take photo',
     addPhotos: 'Photos and videos',
     addFile: 'File',
+    cameraDenied: 'Camera access is off. Turn it on in Settings to take photos for this room.',
+    cameraUnavailable: 'The camera is not available on this device.',
+    cameraTitle: "Can't take photo",
     cancel: 'Cancel',
+    // #7: one-time notice before the first photo/video add. Wording approved by the human on 2026-11-07 (via qa).
+    originalsNoticeTitle: 'Photos are shared as originals',
+    originalsNoticeBody:
+      'Photos and videos keep their full quality and any location saved in them. Everyone in this room can see and download them.',
+    originalsNoticeContinue: 'Continue',
     empty: 'Nothing shared yet.',
     emptyMine: 'You have not shared anything yet.',
     emptyOthers: 'Nobody else has shared anything yet.',
@@ -254,6 +346,39 @@ export const en = {
     notFound: 'This item is no longer available.',
     video: 'Video',
     file: 'File',
+    // Qrew unit 5 (Q 05.01-05.04, 06.03)
+    photo: 'Photo',
+    addButton: 'Add photos or files',
+    addSheetTitle: 'Add to the room',
+    addSheetTakePhoto: 'Take a photo',
+    addSheetPhotos: 'Choose photos & videos',
+    addSheetFiles: 'Browse files',
+    filters: 'Show',
+    originalsUntil: (day: 'today' | 'tomorrow' | 'later', date: string, time: string) =>
+      day === 'today'
+        ? `Originals available until ${time}.`
+        : day === 'tomorrow'
+          ? `Originals available until tomorrow at ${time}.`
+          : `Originals available until ${date} at ${time}.`,
+    closesIn: (min: number) => `Room closes in ${min} min`,
+    saveBefore: (time: string) => `Save originals before ${time}.`,
+    saveOriginal: 'Save original',
+    share: 'Share',
+    sharedByAge: (name: string, age: string) => `Shared by ${name} · ${age}`,
+    savedTitle: 'Original saved',
+    savedBody: 'It stays on your device after the room closes.',
+    dismissSaved: 'Dismiss',
+    closeSheet: 'Close',
+    // Q 05.03: how long ago an item was shared ("Shared by Mia · 18 sec").
+    age: (n: number, unit: 'sec' | 'min' | 'hr' | 'day') =>
+      unit === 'day' ? `${n} ${n === 1 ? 'day' : 'days'}` : `${n} ${unit}`,
+  },
+  // Qrew unit 5 (Q 07.04): shown instead of an alert when camera access is off for Take a photo.
+  cameraOff: {
+    title: 'Camera access is off',
+    body: 'Allow access in Settings to take a photo.',
+    openSettings: 'Open Settings',
+    chooseLibrary: 'Choose from library',
   },
   activity: {
     arrived: 'Arrived',
@@ -261,6 +386,14 @@ export const en = {
     status: 'Status',
     statusValue: (label: string) => `Status: ${label}`,
     chooseStatus: 'Set your status',
+    // Qrew unit 3 (Q 03.01, 04.03)
+    setStatus: 'Set status',
+    helpRequested: 'Help requested',
+    waitingSeen: 'Waiting for someone to see it.',
+    lastLocation: (age: string) => `Last location shared · ${age}`,
+    noLocation: 'No location shared',
+    openLastLocation: 'Open last shared location',
+    imOkNow: "I'm OK now",
     clearStatus: 'Clear status',
     emergencyConfirmTitle: 'Send Emergency?',
     emergencyConfirmBody:
@@ -269,6 +402,9 @@ export const en = {
     emergencyFrom: (name: string) => `${name} needs help`,
     myEmergency: 'Your Emergency is active',
     seenBy: (n: number, total: number) => `Seen by ${n} of ${total}`,
+    /** #12: who has seen it, then the count ("Seen by Mina, Joon · 2 of 3"). */
+    seenByNames: (who: string[], n: number, total: number) =>
+      who.length > 0 ? `Seen by ${who.join(', ')} · ${n} of ${total}` : `Seen by ${n} of ${total}`,
     acknowledge: 'I see it',
     acknowledged: 'You saw this',
     imOk: "I'm OK",
@@ -283,13 +419,12 @@ export const en = {
     startActivity: 'Start activity',
     endActivity: 'End activity',
     endConfirmTitle: 'End the activity?',
-    endConfirmBody: 'Everyone stops sharing and all positions are removed.',
     activityActive: 'Activity running',
     activityIdle: 'No activity running',
     activityIdleHint: 'Positions appear only while the host runs an activity.',
     shareMine: 'Share my live location',
     shareMineHint: 'Only while the app is open. Nobody can turn this on for you.',
-    permissionDenied: 'Location access is off for Moment. Turn it on in Settings to share.',
+    permissionDenied: 'Location access is off for Qrew. Turn it on in Settings to share.',
     openSettings: 'Open Settings',
     reporter: {
       off: '',
@@ -306,13 +441,17 @@ export const en = {
     stalePin: 'stale',
     updated: (age: string) => `Updated ${age}`,
     route: 'Route',
+    /** #10: the route length label, e.g. "Route 5.2 km". */
+    routeDistance: (km: string) => `Route ${km}`,
     drawRoute: 'Draw route',
     editRoute: 'Edit route',
-    pen: 'Pen',
-    penOnHint: 'The map is locked. Draw the route with your finger. Turn the pen off to move the map.',
-    penOffHint: 'Move the map, then tap Pen to keep drawing.',
-    penWait: 'Move the map a little, then tap Pen again.',
-    penNorthUp: 'Turn the map flat with north up, then tap Pen again.',
+    /** Unit 4 F2 (Q 04.01): the editor's pen toggle. */
+    draw: 'Draw',
+    saveRoute: 'Save route',
+    penOnHint: 'The map is locked. Draw the route with your finger. Turn Draw off to move the map.',
+    penOffHint: 'Move the map, then tap Draw to keep drawing.',
+    penWait: 'Move the map a little, then tap Draw again.',
+    penNorthUp: 'Turn the map flat with north up, then tap Draw again.',
     undo: 'Undo',
     clear: 'Clear',
     done: 'Done',
@@ -322,23 +461,59 @@ export const en = {
     showMine: 'Show my location',
     showMineHint: 'Only on your phone. This does not share your location.',
     locating: 'Finding you…',
-    locateDenied: 'Location access is off for Moment.',
-    locateDeniedSettings: 'Location access is off for Moment. Turn it on in Settings to see yourself on the map.',
+    locateDenied: 'Location access is off for Qrew.',
+    locateDeniedSettings: 'Location access is off for Qrew. Turn it on in Settings to see yourself on the map.',
     locateUnavailable: 'Could not find your position. Try again.',
+  },
+  // Qrew unit 4 (Q 03.04): confirm screens. Each line states only what the server does (see lib/end-plan.ts
+  // callers): set_activity_state('ended') removes all live positions and turns sharing off for every member and
+  // touches no photos or the room's end time; end_room sets deleted_at, which closes access at once, and the
+  // room-janitor deletes the room's rows and storage later (no time promised: the schedule is not in code).
+  endActivity: {
+    title: 'End the activity?',
+    body: 'Live location sharing stops for everyone.',
+    roomOpenUntil: (day: 'today' | 'tomorrow' | 'later', date: string, time: string) =>
+      day === 'today'
+        ? `The room stays open until ${time}.`
+        : day === 'tomorrow'
+          ? `The room stays open until tomorrow at ${time}.`
+          : `The room stays open until ${date} at ${time}.`,
+    effects: 'Location off · Photos stay',
+    effectsLabel: 'Location sharing turns off. Photos stay in the room.',
+    confirm: 'End activity',
+    keep: 'Keep activity running',
+    notRunning: 'The activity is not running.',
+    notHost: 'Only the host can end the activity.',
+    back: 'Back to map',
+  },
+  endRoom: {
+    title: 'End the room?',
+    body: 'The room closes now for everyone.',
+    deleted: 'Its messages, photos, and files are deleted from the server. Anything already saved to a phone stays there.',
+    effects: 'Closes now · Messages, photos, files deleted',
+    effectsLabel: 'The room closes now. Messages, photos and files are deleted.',
+    confirm: 'End room for everyone',
+    keep: 'Keep room open',
+    notHost: 'Only the host can end the room.',
   },
   invite: {
     title: 'Invite',
     done: 'Done',
-    hint: 'Scan with the Moment app, or enter the code.',
+    hint: 'Scan with the Qrew app, or enter the code.',
     code: 'Code',
     share: 'Share invite',
+    copyCode: 'Copy code',
+    copied: 'Copied',
     reissue: 'Reissue invite',
     reissueConfirmTitle: 'Reissue the invite?',
     reissueConfirmBody: 'The current QR code, link, and code stop working. People already in the room stay.',
     reissued: 'New invite created.',
     shareMessage: (name: string, code: string, url: string) =>
-      `Join "${name}" on Moment. Code: ${code}\n${url}`,
+      `Join "${name}" on Qrew. Code: ${code}\n${url}`,
     qrLabel: 'Room invite QR code',
+    // Qrew unit 5 (Q 02.04).
+    heading: 'Invite your group',
+    inviteCode: 'Invite code',
   },
   profile: {
     title: 'Profile',
@@ -367,11 +542,19 @@ export const en = {
     deleteConfirmAction: 'Delete',
     deleteCancel: 'Cancel',
     deleteFailed: 'Your account was not deleted. Check your connection and try again.',
+    // Qrew unit 5 (Q 07.01).
+    guestAccount: 'Guest account',
+    hostAccount: 'Host account',
+    guestAccess: 'Guest access',
+    guestAccessBody: 'Join a room using an invitation.',
+    hostAccessBody: 'Create rooms and invite your group.',
+    editProfile: 'Edit profile',
+    editProfileHint: 'Your photo and name are shown to people in your rooms.',
   },
   planPreview: {
     title: 'Plus preview',
     badge: 'Preview — no payment',
-    heading: 'Moment Plus',
+    heading: 'Qrew Plus',
     intro: 'A look at planned Plus benefits. Nothing can be bought yet, and nothing changes in your account.',
     benefit: 'Benefit',
     free: 'Free',
@@ -401,6 +584,6 @@ export const en = {
     fileGone: 'The selected file is no longer available. Choose it again.',
     downloadIncomplete: 'The download did not finish.',
     downloadMismatch: 'The downloaded file does not match the original. Try again.',
-    photosPermission: 'Allow Moment to add to Photos in Settings to save originals.',
+    photosPermission: 'Allow Qrew to add to Photos in Settings to save originals.',
   },
 } as const;

@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Moment",
+    "name": "Qrew",
     "slug": "moment",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -8,15 +8,14 @@
     "scheme": "moment",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon",
+      "icon": "./assets/images/icon.png",
       "bundleIdentifier": "com.iyaproject.moment",
       "supportsTablet": false
     },
     "android": {
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#FAF3E6",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
@@ -31,16 +30,20 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#208AEF",
+          "backgroundColor": "#FAF3E6",
           "image": "./assets/images/splash-icon.png",
-          "imageWidth": 76
+          "imageWidth": 200,
+          "dark": {
+            "backgroundColor": "#FAF3E6",
+            "image": "./assets/images/splash-icon.png"
+          }
         }
       ],
       "expo-secure-store",
       [
         "expo-camera",
         {
-          "cameraPermission": "Moment uses the camera to scan room invite QR codes, to take photos for your room, and, only if you turn on face matching, to take your face reference photo.",
+          "cameraPermission": "Qrew uses the camera to scan room invite QR codes, to take photos for your room, and, only if you turn on face matching, to take your face reference photo.",
           "microphonePermission": false,
           "recordAudioAndroid": false
         }
@@ -49,16 +52,16 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "Moment reads the original photos and videos you choose so they can be shared at full quality in your room.",
-          "cameraPermission": "Moment uses the camera to scan room invite QR codes, to take photos for your room, and, only if you turn on face matching, to take your face reference photo.",
+          "photosPermission": "Qrew reads the original photos and videos you choose so they can be shared at full quality in your room.",
+          "cameraPermission": "Qrew uses the camera to scan room invite QR codes, to take photos for your room, and, only if you turn on face matching, to take your face reference photo.",
           "microphonePermission": false
         }
       ],
       [
         "expo-media-library",
         {
-          "photosPermission": "Moment reads the original photos and videos you choose so they can be shared at full quality in your room.",
-          "savePhotosPermission": "Moment saves the originals you download from a room to your photo library.",
+          "photosPermission": "Qrew reads the original photos and videos you choose so they can be shared at full quality in your room.",
+          "savePhotosPermission": "Qrew saves the originals you download from a room to your photo library.",
           "isAccessMediaLocationEnabled": false
         }
       ],
@@ -71,7 +74,7 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Moment shows your position to your room only while you share it during an activity and the app is open.",
+          "locationWhenInUsePermission": "Qrew shows your position to your room only while you share it during an activity and the app is open.",
           "locationAlwaysAndWhenInUsePermission": false,
           "locationAlwaysPermission": false,
           "motionUsagePermission": false,

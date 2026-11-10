@@ -1,7 +1,9 @@
 import { useFocusEffect, useRouter } from 'expo-router';
 import { type ReactNode, useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import { HandTitle } from '@/components/hand-title';
+import { InkArt } from '@/components/ink-art';
 import { Button, colors, Hint } from '@/components/ui';
 import { en } from '@/i18n/en';
 import { clearMatchRun, type FaceData, lastMatchRun, loadFaceData, runFaceMatch } from '@/lib/face';
@@ -18,10 +20,12 @@ type Props = {
   gap: number;
   renderTile: (item: Media) => ReactNode;
   onRefreshMedia: () => void | Promise<void>;
+  /** Room notices (upload rows, Room closes, Original saved) that scroll with the content. */
+  header?: ReactNode;
 };
 
 /** The gallery's "Me" filter: my matched photos in this room, or setup, disabled and error states. */
-export function PhotosOfMe({ roomId, userId, media, columns, gap, renderTile, onRefreshMedia }: Props) {
+export function PhotosOfMe({ roomId, userId, media, columns, gap, renderTile, onRefreshMedia, header }: Props) {
   const router = useRouter();
   // loadedAt: when the jobs were read; stale 'running' jobs are judged against it.
   const [data, setData] = useState<(FaceData & { loadedAt: number }) | null>(null);
@@ -80,27 +84,43 @@ export function PhotosOfMe({ roomId, userId, media, columns, gap, renderTile, on
     }, [refresh]),
   );
 
+  /** Non-grid states scroll too, so the notices above them never squeeze them off screen. */
+  const scroll = (children: ReactNode) => (
+    <ScrollView contentInsetAdjustmentBehavior="never">
+      {header}
+      {children}
+    </ScrollView>
+  );
+
   if (loadError && !data) {
-    return (
+    return scroll(
       <View style={styles.center}>
         <Hint tone="error">{en.face.loadError}</Hint>
         <Button title={en.home.retry} variant="secondary" onPress={refresh} />
-      </View>
+      </View>,
     );
   }
-  if (!data) return <ActivityIndicator style={styles.loading} />;
+  if (!data) return scroll(<ActivityIndicator style={styles.loading} />);
 
   const counts = faceJobCounts(data.jobs, data.loadedAt);
   const view = faceViewState({ enrolled: !!data.enrollment, run, pending: counts.pending });
   const openSetup = () => router.push({ pathname: '/room/[id]/face', params: { id: roomId } });
 
+  // Q 06.01: handwritten title, two short lines, art, and the black setup button.
   if (view === 'consent') {
     return (
-      <View style={styles.center}>
-        <Text style={styles.title}>{en.face.title}</Text>
-        <Hint>{en.face.intro}</Hint>
-        <Button title={en.face.setUp} onPress={openSetup} />
-      </View>
+      <ScrollView contentContainerStyle={styles.introScroll} contentInsetAdjustmentBehavior="never">
+        {header}
+        <View style={styles.intro}>
+          <View style={styles.introHead}>
+            <HandTitle style={styles.centerText}>{en.face.title}</HandTitle>
+            <Text style={styles.introLine}>{en.face.intro}</Text>
+            <Text style={styles.introMeta}>{en.face.introMeta}</Text>
+          </View>
+          <InkArt art="reference" width={180} />
+          <Button title={en.face.setUp} onPress={openSetup} />
+        </View>
+      </ScrollView>
     );
   }
 
@@ -112,15 +132,15 @@ export function PhotosOfMe({ roomId, userId, media, columns, gap, renderTile, on
 
   // FG-3: while matching is off, no badges and no counts; only the truthful notice.
   if (view === 'disabled') {
-    return (
+    return scroll(
       <View style={styles.center}>
         <Hint>{en.face.disabled}</Hint>
         {manage}
-      </View>
+      </View>,
     );
   }
   if (view === 'error' && run?.kind === 'error') {
-    return (
+    return scroll(
       <View style={styles.center}>
         <Hint tone="error">{en.face.runError(run.message)}</Hint>
         <Button
@@ -134,7 +154,7 @@ export function PhotosOfMe({ roomId, userId, media, columns, gap, renderTile, on
           }}
         />
         {manage}
-      </View>
+      </View>,
     );
   }
 
@@ -160,13 +180,16 @@ export function PhotosOfMe({ roomId, userId, media, columns, gap, renderTile, on
       }}
       refreshing={refreshing}
       ListHeaderComponent={
-        <View style={styles.header}>
+        <>
+          {header}
+          <View style={styles.header}>
           <View style={styles.headerText}>
             {view === 'checking' ? <Hint>{en.face.checking(counts.pending)}</Hint> : null}
             {counts.failed > 0 ? <Hint tone="error">{en.face.failed(counts.failed)}</Hint> : null}
           </View>
-          {manage}
-        </View>
+            {manage}
+          </View>
+        </>
       }
       ListEmptyComponent={
         <View style={styles.center}>
@@ -189,6 +212,12 @@ export function PhotosOfMe({ roomId, userId, media, columns, gap, renderTile, on
 const styles = StyleSheet.create({
   loading: { marginTop: 40 },
   center: { padding: 24, gap: 12, alignItems: 'center' },
+  introScroll: { flexGrow: 1 },
+  intro: { flexGrow: 1, paddingHorizontal: 24, paddingVertical: 28, gap: 28, justifyContent: 'space-between' },
+  introHead: { alignItems: 'center', gap: 6 },
+  centerText: { textAlign: 'center' },
+  introLine: { fontSize: 15, color: colors.secondaryLabel, textAlign: 'center' },
+  introMeta: { fontSize: 13, color: colors.secondaryLabel, textAlign: 'center' },
   title: { fontSize: 17, fontWeight: '600', color: colors.label, textAlign: 'center' },
   link: { fontSize: 15, fontWeight: '500', color: colors.tint },
   header: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 12, paddingBottom: 8 },

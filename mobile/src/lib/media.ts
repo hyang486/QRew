@@ -1,6 +1,7 @@
 import { randomUUID } from 'expo-crypto';
 import { Directory, File, Paths } from 'expo-file-system';
 import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
+import * as Device from 'expo-device';
 import * as ImagePicker from 'expo-image-picker';
 import * as MediaLibrary from 'expo-media-library';
 import * as VideoThumbnails from 'expo-video-thumbnails';
@@ -10,6 +11,7 @@ import { Share } from 'react-native';
 import { en } from '@/i18n/en';
 
 import type { Tables } from './database.types';
+import { CameraError, cameraStep } from './camera-plan';
 import { errorMessage } from './errors';
 import { EXT_BY_MIME, exportFileName, extensionFor } from './file-name';
 import { clearImageDiskCache } from './image-cache';
@@ -25,9 +27,14 @@ import {
   type QueueJob,
   removeJob,
   requeue,
+  roomIdle,
   type RoomUploadSummary,
   roomSummary,
+  sharedBody,
 } from './upload-plan';
+
+// G9 F2: the gallery tells camera problems apart from upload failures.
+export { CameraError };
 
 /**
  * Room media: original photos, videos and files.
@@ -96,9 +103,8 @@ export function formatBytes(n: number | null | undefined) {
 
 /** Photos and videos from the system picker, as originals (no recompression, no editing). */
 export async function pickPhotosAndVideos(): Promise<PickedItem[]> {
-  // iOS needs library access to hand over passthrough (original) videos; ask before the picker
-  // so the dialog does not appear after a selection. Denial still allows picking photos.
-  await ImagePicker.requestMediaLibraryPermissionsAsync().catch(() => undefined);
+  // #6/#7: no photo library permission request. The system picker (PHPicker) needs none, and asking first
+  // showed iOS's Limited Access sheet, which swallowed the first pick. Only the picked items are shared.
   const result = await ImagePicker.launchImageLibraryAsync({
     mediaTypes: ['images', 'videos'],
     allowsMultipleSelection: true,
@@ -110,20 +116,41 @@ export async function pickPhotosAndVideos(): Promise<PickedItem[]> {
     videoExportPreset: ImagePicker.VideoExportPreset.Passthrough,
   });
   if (result.canceled) return [];
-  return result.assets.map((a) => {
-    const kind: MediaKind = a.type === 'video' ? 'video' : 'photo';
-    const mimeType = a.mimeType ?? (kind === 'video' ? 'video/quicktime' : 'image/jpeg');
-    const fallbackName = `${kind === 'video' ? 'video' : 'photo'}.${EXT_BY_MIME[mimeType] ?? 'bin'}`;
-    return {
-      uri: a.uri,
-      kind,
-      mimeType,
-      fileName: a.fileName ?? fallbackName,
-      width: a.width || undefined,
-      height: a.height || undefined,
-      durationMs: a.duration ?? undefined,
-    };
-  });
+  return result.assets.map(pickedFromAsset);
+}
+
+/**
+ * #13: one photo from the camera, as the original capture (no editing). Asks for camera access
+ * first; throws a readable error when access is off or the device has no camera (the Simulator).
+ */
+export async function takePhoto(): Promise<PickedItem[]> {
+  // G9 F1: decide before any native camera call (the Simulator's missing camera is an uncatchable ObjC crash).
+  if (cameraStep(Device.isDevice) === 'unavailable') throw new CameraError(en.media.cameraUnavailable);
+  const perm = await ImagePicker.requestCameraPermissionsAsync();
+  if (!perm.granted) throw new CameraError(en.media.cameraDenied, 'denied');
+  let result: ImagePicker.ImagePickerResult;
+  try {
+    result = await ImagePicker.launchCameraAsync({ mediaTypes: ['images'], allowsEditing: false, quality: 1, exif: false });
+  } catch {
+    throw new CameraError(en.media.cameraUnavailable);
+  }
+  if (result.canceled) return [];
+  return result.assets.map(pickedFromAsset);
+}
+
+function pickedFromAsset(a: ImagePicker.ImagePickerAsset): PickedItem {
+  const kind: MediaKind = a.type === 'video' ? 'video' : 'photo';
+  const mimeType = a.mimeType ?? (kind === 'video' ? 'video/quicktime' : 'image/jpeg');
+  const fallbackName = `${kind === 'video' ? 'video' : 'photo'}.${EXT_BY_MIME[mimeType] ?? 'bin'}`;
+  return {
+    uri: a.uri,
+    kind,
+    mimeType,
+    fileName: a.fileName ?? fallbackName,
+    width: a.width || undefined,
+    height: a.height || undefined,
+    durationMs: a.duration ?? undefined,
+  };
 }
 
 /** Any file from the system document picker. */
@@ -321,6 +348,30 @@ let store: UploadStore = { jobs: [], done: {} };
 const storeListeners = new Set<() => void>();
 const controllers = new Map<string, AbortController>();
 let pumping = false;
+// #8: finished uploads per room not yet announced in chat; posted as one line when the room's batch ends.
+const unannounced = new Map<string, { uploaderId: string; kind: MediaKind }[]>();
+
+/**
+ * #8: once nothing is queued or uploading for the room, posts one kind='media' chat line for the uploads that
+ * finished since the last line ("shared 3 photos"). No media_id: messages.media_id cascades on delete, so
+ * deleting one photo would remove the whole line; the line opens Photos instead. Best effort: a failed
+ * insert never fails the uploads, which are already in Photos.
+ */
+function announceIfIdle(roomId: string) {
+  const done = unannounced.get(roomId);
+  if (!done || done.length === 0 || !roomIdle(store.jobs, roomId)) return;
+  unannounced.delete(roomId);
+  const body = sharedBody(done.map((d) => d.kind));
+  const last = done[done.length - 1];
+  if (!body) return;
+  supabase
+    .from('messages')
+    .insert({ room_id: roomId, sender_id: last.uploaderId, kind: 'media', body })
+    .then(
+      () => {},
+      () => {},
+    );
+}
 
 function setStore(next: UploadStore) {
   if (next === store) return;
@@ -345,6 +396,10 @@ async function pump() {
       try {
         await runJob(current, (f) => setJobs((js) => applyProgress(js, current.id, f)), controller.signal);
         const done = { ...store.done, [current.roomId]: (store.done[current.roomId] ?? 0) + 1 };
+        unannounced.set(current.roomId, [
+          ...(unannounced.get(current.roomId) ?? []),
+          { uploaderId: current.uploaderId, kind: current.item.kind },
+        ]);
         setStore({ jobs: removeJob(store.jobs, current.id), done });
       } catch (e) {
         if (controller.signal.aborted || isAbortError(e)) {
@@ -359,6 +414,7 @@ async function pump() {
         }
       } finally {
         controllers.delete(current.id);
+        announceIfIdle(current.roomId);
       }
     }
   } finally {
@@ -382,7 +438,12 @@ export function retryUpload(id: string) {
 export function cancelUpload(id: string) {
   const controller = controllers.get(id);
   if (controller) controller.abort();
-  else setJobs((js) => removeJob(js, id));
+  else {
+    const roomId = store.jobs.find((j) => j.id === id)?.roomId;
+    setJobs((js) => removeJob(js, id));
+    // Cancelling the last waiting job ends the batch.
+    if (roomId) announceIfIdle(roomId);
+  }
 }
 
 export function dismissUpload(id: string) {
@@ -392,6 +453,7 @@ export function dismissUpload(id: string) {
 /** Sign-out / account gone: stop every upload and forget the queue. */
 export function cancelAllUploads() {
   for (const c of controllers.values()) c.abort();
+  unannounced.clear();
   setStore({ jobs: [], done: {} });
 }
 
@@ -556,6 +618,21 @@ export function clearAllRoomCaches() {
 }
 
 export type DownloadResult = { file: File; bytes: number; sha256: string };
+
+/**
+ * N5: removes the downloaded copy of one original (its per-media cache folder, including a partial download)
+ * once Save or Share is finished. The photo library and the share target keep their own copies; the app cache
+ * must not keep originals beyond what the user saved. Best effort; room end, leave and sign-out still clear
+ * the whole room folder.
+ */
+export function discardDownload(media: Pick<Media, 'room_id' | 'id'>) {
+  try {
+    const mediaDir = new Directory(roomCacheDir(media.room_id), media.id);
+    if (mediaDir.exists) mediaDir.delete();
+  } catch {
+    // Cache cleanup is best effort.
+  }
+}
 
 /**
  * Downloads the stored original into the room's cache folder and verifies it against the

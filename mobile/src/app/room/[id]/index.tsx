@@ -1,4 +1,4 @@
-import { Link, Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { type Href, Link, Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useReducer, useState } from 'react';
 import {
   ActivityIndicator,
@@ -11,20 +11,26 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { SymbolView } from 'expo-symbols';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { HandTitle } from '@/components/hand-title';
 import { RoomActivityBar } from '@/components/room-activity';
-import { Button, colors, Hint, Screen } from '@/components/ui';
+import { RoomEnded } from '@/components/room-ended';
+import { Button, colors, Hint, radius, Screen } from '@/components/ui';
 import { en } from '@/i18n/en';
 import { useAuth } from '@/lib/auth';
 import { type ChatItem, MAX_MESSAGE_LENGTH, useChat } from '@/lib/chat';
+import { endsDay } from '@/lib/chat-plan';
 import { canSendDraft, composerAutoFocus, composerReducer, initialComposer } from '@/lib/composer';
 import { errorMessage } from '@/lib/errors';
 import { presentServerReminder, syncExpiryReminders } from '@/lib/expiry-reminders';
 import { clearRoomCache, useRoomUploadSummary } from '@/lib/media';
 import { useRoomEvents } from '@/lib/room-channel';
-import { formatRemaining, getRoom, listMembers, REMINDER_WINDOW_MS, type Room } from '@/lib/rooms';
+import { showEndsSoon } from '@/lib/expiry-plan';
+import { getRoom, listMembers, type Room } from '@/lib/rooms';
 import { useHeaderOverlap } from '@/lib/use-header-overlap';
+import { useKeyboardOpen } from '@/lib/use-keyboard-open';
 import { useNow } from '@/lib/use-now';
 
 type State =
@@ -35,7 +41,6 @@ type State =
 
 export default function RoomScreen() {
   const { id, from } = useLocalSearchParams<{ id: string; from?: string }>();
-  const router = useRouter();
   const { session } = useAuth();
   const userId = session?.user.id;
   const now = useNow(15_000);
@@ -99,16 +104,13 @@ export default function RoomScreen() {
   const remainingMs = state.status === 'ready' ? new Date(state.room.expires_at).getTime() - now : 0;
 
   // RLS hides the room once it expires, ends or the user leaves; the clock covers the gap until a reload.
+  // Q 06.04: the shared ended screen; the closed-at time only when this row shows it (expires_at passed).
   if (state.status === 'gone' || (state.status === 'ready' && remainingMs <= 0)) {
     return (
-      <Screen>
-        <Stack.Screen options={{ title: '' }} />
-        <View style={styles.gone}>
-          <Text style={styles.goneTitle}>{en.room.gone}</Text>
-          <Hint>{from === 'reminder' ? en.room.reminderGoneHint : en.room.goneHint}</Hint>
-        </View>
-        <Button title={en.room.backToRooms} onPress={() => router.dismissTo('/')} />
-      </Screen>
+      <>
+        <Stack.Screen options={{ title: '', headerTitle: '' }} />
+        <RoomEnded room={state.status === 'ready' ? state.room : null} nowMs={now} reminder={from === 'reminder'} />
+      </>
     );
   }
 
@@ -150,12 +152,23 @@ function ChatRoom({
 }) {
   const insets = useSafeAreaInsets();
   const { rootRef, onLayout: measureRoot, top, overlap: headerOverlap } = useHeaderOverlap();
+  const router = useRouter();
   const chat = useChat(room.id, userId, onNewSender);
   const uploadSummary = useRoomUploadSummary(room.id);
   const [composer, dispatchComposer] = useReducer(composerReducer, initialComposer);
   const draft = composer.draft;
-  const remaining = formatRemaining(remainingMs);
   const canSend = canSendDraft(draft);
+  // Q 03.01 head (title, Ends line, tabs) and #9 ends-soon line hide while the keyboard is open, so typing
+  // keeps the message space (work list: "Title must not cost message space with keyboard open").
+  const keyboardOpen = useKeyboardOpen();
+  const expiresMs = new Date(room.expires_at).getTime();
+  const nowMs = expiresMs - remainingMs;
+  const endsSoon = showEndsSoon(room.created_at, room.expires_at, nowMs);
+  const endsLine = en.room.endsOn(
+    endsDay(expiresMs, nowMs),
+    new Date(expiresMs).toLocaleDateString([], { month: 'short', day: 'numeric' }),
+    new Date(expiresMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+  );
 
   function submit() {
     if (!canSend) return;
@@ -170,6 +183,11 @@ function ChatRoom({
     if (failedCount > 0) onSendFailed();
   }, [failedCount, onSendFailed]);
 
+  // #8: a "shared 3 photos" line opens Photos.
+  function openPhotos() {
+    router.push({ pathname: '/room/[id]/gallery', params: { id: room.id } });
+  }
+
   function onFailedPress(item: ChatItem) {
     Alert.alert(en.chat.failed, undefined, [
       { text: en.room.cancel, style: 'cancel' },
@@ -178,71 +196,65 @@ function ChatRoom({
     ]);
   }
 
+  const offline = !chat.live && !chat.loading ? <Text style={styles.offline}>{en.chat.reconnecting}</Text> : null;
+
   return (
     <>
-      <Stack.Screen
-        options={{
-          title: room.name,
-          headerRight: () => (
-            <View style={styles.headerActions}>
-              <Link
-                href={{ pathname: '/room/[id]/gallery', params: { id: room.id } }}
-                style={[styles.headerLink, uploadSummary.failed > 0 && { color: colors.danger }]}
-                accessibilityRole="button"
-                accessibilityLabel={en.media.headerLinkA11y(uploadSummary.pending, uploadSummary.failed)}
-              >
-                {uploadSummary.failed > 0
-                  ? en.media.headerLinkFailed
-                  : uploadSummary.pending > 0
-                    ? en.media.headerLinkUploading(uploadSummary.pending)
-                    : en.media.headerLink}
-              </Link>
-              {room.location_allowed || room.host_id === userId ? (
-                <Link
-                  href={{ pathname: '/room/[id]/map', params: { id: room.id } }}
-                  style={styles.headerLink}
-                  accessibilityRole="button"
-                >
-                  {en.map.headerLink}
-                </Link>
-              ) : null}
-              <Link
-                href={{ pathname: '/room/[id]/invite', params: { id: room.id } }}
-                style={styles.headerLink}
-                accessibilityRole="button"
-              >
-                {en.room.invite}
-              </Link>
-              <Link
-                href={{ pathname: '/room/[id]/info', params: { id: room.id } }}
-                style={styles.headerLink}
-                accessibilityRole="button"
-              >
-                {en.room.info}
-              </Link>
-            </View>
-          ),
-        }}
-      />
+      {/* Q 03.01: the nav bar keeps the back button and "Chat"; the room name is the handwritten title below. */}
+      <Stack.Screen options={{ title: en.chat.title }} />
       <KeyboardAvoidingView style={styles.flex} behavior="padding" keyboardVerticalOffset={top}>
         <View
           ref={rootRef}
           onLayout={measureRoot}
           style={[styles.flex, { backgroundColor: colors.background, paddingTop: headerOverlap }]}
         >
-          <View style={styles.strip}>
-            <Text style={styles.remaining} accessibilityRole="header">
-              {en.room.endsIn(remaining)}
-            </Text>
-            {!chat.live && !chat.loading ? <Text style={styles.offline}>{en.chat.reconnecting}</Text> : null}
-          </View>
-          {remainingMs < REMINDER_WINDOW_MS ? (
-            <View style={styles.banner} accessibilityRole="alert">
-              <Text style={styles.bannerTitle}>{en.room.reminderTitle}</Text>
-              <Text style={styles.bannerBody}>{en.room.reminderBody(room.name, remaining)}</Text>
+          {keyboardOpen ? (
+            offline ? <View style={styles.compactStrip}>{offline}</View> : null
+          ) : (
+            <View style={styles.head}>
+              <HandTitle style={styles.title}>{room.name}</HandTitle>
+              <View style={styles.endsRow}>
+                <Text style={styles.ends}>{endsLine}</Text>
+                {offline}
+              </View>
+              {endsSoon ? (
+                <Link href={{ pathname: '/room/[id]/info', params: { id: room.id } }} asChild>
+                  <Pressable style={styles.banner} accessibilityRole="link" accessibilityHint={en.room.info}>
+                    <Text style={styles.bannerText} numberOfLines={1}>
+                      {en.room.endsSoonLine}
+                    </Text>
+                  </Pressable>
+                </Link>
+              ) : null}
+              <View style={styles.tabs} accessibilityRole="tablist" accessibilityLabel={en.chat.tabs}>
+                <Tab label={en.chat.tabChat} selected />
+                <Tab
+                  href={{ pathname: '/room/[id]/gallery', params: { id: room.id } }}
+                  label={
+                    uploadSummary.failed > 0
+                      ? en.media.headerLinkFailed
+                      : uploadSummary.pending > 0
+                        ? en.media.headerLinkUploading(uploadSummary.pending)
+                        : en.media.headerLink
+                  }
+                  danger={uploadSummary.failed > 0}
+                  a11y={en.media.headerLinkA11y(uploadSummary.pending, uploadSummary.failed)}
+                />
+                {room.location_allowed || room.host_id === userId ? (
+                  <Tab href={{ pathname: '/room/[id]/map', params: { id: room.id } }} label={en.map.headerLink} />
+                ) : null}
+                <Tab href={{ pathname: '/room/[id]/invite', params: { id: room.id } }} label={en.room.invite} />
+                <Tab href={{ pathname: '/room/[id]/info', params: { id: room.id } }} label={en.room.info} />
+              </View>
             </View>
-          ) : null}
-          <RoomActivityBar roomId={room.id} activitySeq={room.activity_seq} userId={userId} names={names} />
+          )}
+          <RoomActivityBar
+            roomId={room.id}
+            activitySeq={room.activity_seq}
+            userId={userId}
+            names={names}
+            hideControls={keyboardOpen}
+          />
 
           {chat.loading ? (
             <ActivityIndicator style={styles.loading} />
@@ -267,41 +279,45 @@ function ChatRoom({
                   <Hint>{en.chat.empty}</Hint>
                 </View>
               }
-              renderItem={({ item, index }) => (
+              renderItem={({ item }) => (
                 <MessageRow
                   item={item}
-                  older={chat.messages[index + 1]}
                   mine={item.sender_id === userId}
                   name={item.sender_id ? (names.get(item.sender_id) ?? en.chat.formerMember) : ''}
                   onFailedPress={onFailedPress}
+                  onMediaPress={openPhotos}
                 />
               )}
             />
           )}
 
+          {/* Q 03.01: one rounded field with the arrow Send inside. Q's left chat icon has no action: omitted. */}
           <View style={[styles.composer, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-            <TextInput
-              key={composer.key}
-              autoFocus={composerAutoFocus(composer)}
-              style={styles.input}
-              value={draft}
-              onChange={(e) => dispatchComposer({ type: 'change', key: composer.key, text: e.nativeEvent.text })}
-              placeholder={en.chat.placeholder}
-              placeholderTextColor={colors.secondaryLabel}
-              accessibilityLabel={en.chat.placeholder}
-              multiline
-              maxLength={MAX_MESSAGE_LENGTH}
-            />
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={en.chat.send}
-              accessibilityState={{ disabled: !canSend }}
-              disabled={!canSend}
-              onPress={submit}
-              style={({ pressed }) => [styles.sendButton, (!canSend || pressed) && { opacity: 0.4 }]}
-            >
-              <Text style={styles.sendText}>{en.chat.send}</Text>
-            </Pressable>
+            <View style={styles.inputWrap}>
+              <TextInput
+                key={composer.key}
+                autoFocus={composerAutoFocus(composer)}
+                style={styles.input}
+                value={draft}
+                onChange={(e) => dispatchComposer({ type: 'change', key: composer.key, text: e.nativeEvent.text })}
+                placeholder={en.chat.placeholder}
+                placeholderTextColor={colors.secondaryLabel}
+                accessibilityLabel={en.chat.placeholder}
+                multiline
+                maxLength={MAX_MESSAGE_LENGTH}
+              />
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={en.chat.send}
+                accessibilityState={{ disabled: !canSend }}
+                disabled={!canSend}
+                onPress={submit}
+                hitSlop={6}
+                style={({ pressed }) => [styles.sendButton, (!canSend || pressed) && { opacity: 0.3 }]}
+              >
+                <SymbolView name="arrow.right" size={20} tintColor={colors.label} />
+              </Pressable>
+            </View>
           </View>
         </View>
       </KeyboardAvoidingView>
@@ -309,25 +325,96 @@ function ChatRoom({
   );
 }
 
-const NOTICE_KINDS = new Set(['system', 'arrival', 'status', 'emergency']);
+// Centered lines rather than bubbles. #8: 'media' is the uploader's "shared 3 photos" line.
+const NOTICE_KINDS = new Set(['system', 'arrival', 'status', 'emergency', 'media']);
+
+/** Q 03.01 tab pill: the current section black, the others pale links. */
+function Tab({
+  href,
+  label,
+  selected,
+  danger,
+  a11y,
+}: {
+  href?: Href;
+  label: string;
+  selected?: boolean;
+  danger?: boolean;
+  a11y?: string;
+}) {
+  const router = useRouter();
+  // Larger text sizes shrink the label to fit its pill instead of wrapping or clipping it.
+  const text = (
+    <Text
+      style={[styles.tabText, selected && styles.tabTextSelected, danger && styles.tabTextDanger]}
+      numberOfLines={1}
+      adjustsFontSizeToFit
+      minimumFontScale={0.5}
+      maxFontSizeMultiplier={1.6}
+    >
+      {label}
+    </Text>
+  );
+  if (!href) {
+    return (
+      <View
+        style={[styles.tab, styles.tabSelected]}
+        accessibilityRole="tab"
+        accessibilityLabel={a11y ?? label}
+        accessibilityState={{ selected: !!selected }}
+      >
+        {text}
+      </View>
+    );
+  }
+  // Not <Link asChild>: its Slot merges styles as objects, so a function style ({ pressed }) => …
+  // was dropped and the pill (background, flex: 1) never applied (U3 F1).
+  return (
+    <Pressable
+      accessibilityRole="tab"
+      accessibilityLabel={a11y ?? label}
+      accessibilityState={{ selected: false }}
+      onPress={() => router.push(href)}
+      style={({ pressed }) => [styles.tab, pressed && styles.tabPressed]}
+    >
+      {text}
+    </Pressable>
+  );
+}
 
 function MessageRow({
   item,
-  older,
   mine,
   name,
   onFailedPress,
+  onMediaPress,
 }: {
   item: ChatItem;
-  older: ChatItem | undefined;
   mine: boolean;
   name: string;
   onFailedPress: (item: ChatItem) => void;
+  onMediaPress: () => void;
 }) {
   const time = useMemo(
     () => new Date(item.created_at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
     [item.created_at],
   );
+
+  if (item.kind === 'media') {
+    const text = en.chat.shared(mine ? en.chat.you : name, item.body || en.chat.sharedFallback);
+    return (
+      <Pressable
+        style={styles.noticeRow}
+        accessibilityRole="button"
+        accessibilityHint={en.chat.openPhotosHint}
+        onPress={onMediaPress}
+      >
+        <Text style={[styles.notice, styles.mediaNotice]}>
+          {text} · {time}
+        </Text>
+      </Pressable>
+    );
+  }
 
   if (NOTICE_KINDS.has(item.kind)) {
     const emergency = item.kind === 'emergency';
@@ -340,31 +427,29 @@ function MessageRow({
     );
   }
 
-  // Media messages render in checkpoint 5; until then show a plain placeholder text.
-  const body = item.kind === 'media' ? '📎' : item.body;
-  const showName = !mine && (older?.sender_id !== item.sender_id || NOTICE_KINDS.has(older?.kind ?? ''));
-
+  // Q 03.01: "Jay · 8:48 AM" / "You · 8:53 AM" above each bubble; sending and failed states replace the time.
+  const failed = item.pending === 'failed';
+  const when = item.pending === 'sending' ? en.chat.sending : failed ? en.chat.failed : time;
   const bubble = (
-    <View style={[styles.bubble, mine ? styles.mine : styles.theirs, item.pending === 'failed' && styles.failedBubble]}>
-      <Text selectable style={[styles.body, mine && styles.mineText]}>
-        {body}
+    <View style={[styles.bubble, mine ? styles.mine : styles.theirs, failed && styles.failedBubble]}>
+      <Text selectable style={styles.body}>
+        {item.body}
       </Text>
     </View>
   );
 
   return (
     <View style={[styles.row, mine ? styles.rowMine : styles.rowTheirs]}>
-      {showName ? <Text style={styles.sender}>{name}</Text> : null}
-      {item.pending === 'failed' ? (
+      <Text style={[styles.meta, failed && styles.failedMeta]}>
+        {mine ? en.chat.you : name} · {when}
+      </Text>
+      {failed ? (
         <Pressable accessibilityRole="button" accessibilityHint={en.chat.failed} onPress={() => onFailedPress(item)}>
           {bubble}
         </Pressable>
       ) : (
         bubble
       )}
-      <Text style={[styles.meta, item.pending === 'failed' && styles.failedMeta]}>
-        {item.pending === 'sending' ? en.chat.sending : item.pending === 'failed' ? en.chat.failed : time}
-      </Text>
     </View>
   );
 }
@@ -373,72 +458,74 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   loading: { marginTop: 48 },
   center: { padding: 20, gap: 12 },
-  headerActions: { flexDirection: 'row', gap: 4 },
-  headerLink: { fontSize: 17, color: colors.tint, paddingHorizontal: 6 },
-  strip: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'baseline',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  remaining: { fontSize: 15, fontWeight: '600', color: colors.label, fontVariant: ['tabular-nums'] },
+  head: { paddingHorizontal: 24, paddingTop: 4, paddingBottom: 10, gap: 6 },
+  title: { fontSize: 30, lineHeight: 38 },
+  endsRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 },
+  ends: { flexShrink: 1, fontSize: 14, color: colors.secondaryLabel, fontVariant: ['tabular-nums'] },
+  compactStrip: { paddingHorizontal: 24, paddingVertical: 6, alignItems: 'flex-end' },
   offline: { fontSize: 13, color: colors.warning },
   banner: {
-    marginHorizontal: 16,
-    marginBottom: 8,
     backgroundColor: colors.field,
     borderLeftWidth: 4,
     borderLeftColor: colors.warning,
     borderRadius: 12,
     borderCurve: 'continuous',
-    padding: 12,
-    gap: 4,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
   },
-  bannerTitle: { fontSize: 15, fontWeight: '600', color: colors.label },
-  bannerBody: { fontSize: 14, color: colors.label },
-  list: { paddingHorizontal: 12, paddingVertical: 8, gap: 2, flexGrow: 1 },
+  bannerText: { fontSize: 14, color: colors.label },
+  tabs: { flexDirection: 'row', gap: 6, marginTop: 8 },
+  tab: {
+    flex: 1,
+    minHeight: 32,
+    paddingHorizontal: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.pill,
+    borderCurve: 'continuous',
+    backgroundColor: colors.field,
+  },
+  tabSelected: { backgroundColor: colors.tint },
+  tabPressed: { opacity: 0.5 },
+  tabText: { fontSize: 13, color: colors.label },
+  tabTextSelected: { color: colors.onTint },
+  tabTextDanger: { color: colors.danger },
+  list: { paddingHorizontal: 24, paddingVertical: 8, gap: 2, flexGrow: 1 },
   // The list is inverted, so the empty state is flipped back.
   emptyWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', transform: [{ scaleY: -1 }] },
-  row: { marginVertical: 2, maxWidth: '80%' },
+  row: { marginVertical: 6, maxWidth: '80%', gap: 4 },
   rowMine: { alignSelf: 'flex-end', alignItems: 'flex-end' },
   rowTheirs: { alignSelf: 'flex-start', alignItems: 'flex-start' },
-  sender: { fontSize: 12, color: colors.secondaryLabel, marginTop: 6, marginBottom: 2, marginLeft: 12 },
-  bubble: { borderRadius: 18, borderCurve: 'continuous', paddingHorizontal: 14, paddingVertical: 8 },
-  mine: { backgroundColor: colors.tint },
+  bubble: { borderRadius: 10, borderCurve: 'continuous', paddingHorizontal: 12, paddingVertical: 9 },
+  mine: { backgroundColor: colors.fieldStrong },
   theirs: { backgroundColor: colors.field },
   failedBubble: { opacity: 0.6 },
-  body: { fontSize: 17, color: colors.label },
-  mineText: { color: 'white' },
-  meta: { fontSize: 11, color: colors.secondaryLabel, marginTop: 2, marginHorizontal: 8 },
+  body: { fontSize: 16, color: colors.label },
+  meta: { fontSize: 12, color: colors.secondaryLabel },
   failedMeta: { color: colors.danger },
-  noticeRow: { alignSelf: 'center', marginVertical: 6, paddingHorizontal: 16 },
+  noticeRow: { alignSelf: 'center', marginVertical: 8, paddingHorizontal: 16 },
   notice: { fontSize: 13, color: colors.secondaryLabel, textAlign: 'center' },
-  emergency: { color: colors.danger, fontWeight: '700' },
-  composer: {
+  emergency: { color: colors.danger, fontWeight: '600' },
+  mediaNotice: { color: colors.label, textDecorationLine: 'underline' },
+  composer: { paddingHorizontal: 24, paddingTop: 8, backgroundColor: colors.background },
+  inputWrap: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    gap: 8,
-    paddingHorizontal: 12,
-    paddingTop: 8,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.separator,
-    backgroundColor: colors.background,
+    borderWidth: StyleSheet.hairlineWidth * 2,
+    borderColor: colors.separator,
+    borderRadius: 22,
+    borderCurve: 'continuous',
+    paddingLeft: 16,
+    paddingRight: 6,
   },
   input: {
     flex: 1,
     maxHeight: 120,
-    minHeight: 36,
-    backgroundColor: colors.field,
+    minHeight: 42,
     color: colors.label,
-    borderRadius: 18,
-    paddingHorizontal: 14,
-    paddingTop: 8,
-    paddingBottom: 8,
-    fontSize: 17,
+    paddingTop: 11,
+    paddingBottom: 11,
+    fontSize: 16,
   },
-  sendButton: { height: 36, justifyContent: 'center', paddingHorizontal: 8 },
-  sendText: { fontSize: 17, fontWeight: '600', color: colors.tint },
-  gone: { paddingVertical: 48, alignItems: 'center', gap: 8 },
-  goneTitle: { fontSize: 20, fontWeight: '600', color: colors.label },
+  sendButton: { width: 36, height: 42, alignItems: 'center', justifyContent: 'center' },
 });

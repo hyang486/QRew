@@ -1,8 +1,10 @@
 import * as Notifications from 'expo-notifications';
 import { type Href, Stack, useNavigationContainerRef, useRouter } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
+import { useFonts } from 'expo-font';
 import { useEffect } from 'react';
 
+import { HAND_FONTS } from '@/components/hand-title';
 import { LocationReporters } from '@/components/location-reporters';
 import { en } from '@/i18n/en';
 import { AuthProvider, useAuth } from '@/lib/auth';
@@ -15,10 +17,14 @@ SplashScreen.preventAutoHideAsync();
 function RootNavigator() {
   const { session, loading } = useAuth();
   const signedIn = !!session;
+  // Qrew: the bundled title fonts load from assets at runtime (no rebuild). The splash waits for them so the
+  // first title is not drawn in the system font; a failed load just keeps the system font.
+  const [fontsLoaded, fontError] = useFonts(HAND_FONTS);
+  const fontsReady = fontsLoaded || !!fontError;
 
   useEffect(() => {
-    if (!loading) SplashScreen.hideAsync();
-  }, [loading]);
+    if (!loading && fontsReady) SplashScreen.hideAsync();
+  }, [loading, fontsReady]);
 
   // A tapped expiry reminder (also one that cold-started the app) opens its room. The room screen
   // checks access and shows the ended notice if the room is gone. Signed out: held until sign-in.
@@ -57,19 +63,24 @@ function RootNavigator() {
     <LocationReporters />
     <Stack screenOptions={{ headerLargeTitle: false, headerBackButtonDisplayMode: 'minimal' }}>
       <Stack.Protected guard={signedIn} redirectTo="/welcome">
-        <Stack.Screen name="index" options={{ title: en.home.title, headerLargeTitle: true }} />
-        <Stack.Screen name="profile" options={{ title: en.profile.title }} />
+        <Stack.Screen name="index" options={{ title: en.home.title, headerTitle: '' }} />
+        <Stack.Screen name="profile" options={{ title: en.profile.title, headerTitle: '' }} />
+        <Stack.Screen name="profile-edit" options={{ title: en.profile.editProfile, headerTitle: '' }} />
         {/* Modal screens (upgrade, room/[id]/invite): keep MODAL_ROUTES in lib/root-link.ts in sync (P-3). */}
-        <Stack.Screen name="upgrade" options={{ title: en.upgrade.title, presentation: 'modal' }} />
+        <Stack.Screen name="upgrade" options={{ title: en.upgrade.title, headerTitle: '', presentation: 'modal' }} />
         <Stack.Screen name="plan-preview" options={{ title: en.planPreview.title }} />
-        <Stack.Screen name="create-room" options={{ title: en.createRoom.title }} />
-        <Stack.Screen name="join/index" options={{ title: en.join.title }} />
-        <Stack.Screen name="scan" options={{ title: en.scan.title }} />
-        <Stack.Screen name="preview" options={{ title: en.preview.title }} />
+        <Stack.Screen name="create-room" options={{ title: en.createRoom.title, headerTitle: '' }} />
+        <Stack.Screen name="join/index" options={{ title: en.join.title, headerTitle: '' }} />
+        <Stack.Screen name="scan" options={{ title: en.scan.title, headerTitle: '' }} />
+        {/* Qrew: the handwritten title is in the content (QScreen); the nav bar keeps only Back. */}
+        <Stack.Screen name="preview" options={{ title: en.preview.title, headerTitle: '' }} />
         <Stack.Screen name="room/[id]/index" options={{ title: '' }} />
-        <Stack.Screen name="room/[id]/info" options={{ title: en.room.info }} />
-        <Stack.Screen name="room/[id]/gallery" options={{ title: en.media.title }} />
-        <Stack.Screen name="room/[id]/map" options={{ title: en.map.title }} />
+        <Stack.Screen name="room/[id]/info" options={{ title: en.room.info, headerTitle: '' }} />
+        <Stack.Screen name="room/[id]/gallery" options={{ title: en.media.title, headerTitle: '' }} />
+        <Stack.Screen name="room/[id]/camera-off" options={{ title: en.cameraOff.title, headerTitle: '' }} />
+        <Stack.Screen name="room/[id]/map" options={{ title: en.map.title, headerTitle: '' }} />
+        <Stack.Screen name="room/[id]/end-activity" options={{ title: en.endActivity.title, headerTitle: '' }} />
+        <Stack.Screen name="room/[id]/end-room" options={{ title: en.endRoom.title, headerTitle: '' }} />
         <Stack.Screen name="room/[id]/face" options={{ title: en.face.title }} />
         <Stack.Screen name="room/[id]/media/[mediaId]" options={{ title: '' }} />
         <Stack.Screen name="room/[id]/invite" options={{ title: en.invite.title, presentation: 'modal' }} />
@@ -80,9 +91,12 @@ function RootNavigator() {
 
       <Stack.Protected guard={!signedIn} redirectTo="/">
         <Stack.Screen name="welcome" options={{ title: en.appName, headerShown: false }} />
-        <Stack.Screen name="guest" options={{ title: en.guest.title }} />
-        <Stack.Screen name="sign-in" options={{ title: en.signIn.title }} />
-        <Stack.Screen name="sign-up" options={{ title: en.signUp.title }} />
+        {/* Item 10: signed-out Join → code / QR → name; the invite opens from Rooms after sign-in. */}
+        <Stack.Screen name="start/code" options={{ title: en.join.title, headerTitle: '' }} />
+        <Stack.Screen name="start/scan" options={{ title: en.scan.title, headerTitle: '' }} />
+        <Stack.Screen name="guest" options={{ title: en.guest.title, headerTitle: '' }} />
+        <Stack.Screen name="sign-in" options={{ title: en.signIn.title, headerTitle: '' }} />
+        <Stack.Screen name="sign-up" options={{ title: en.signUp.title, headerTitle: '' }} />
       </Stack.Protected>
     </Stack>
     </>

@@ -12,10 +12,13 @@ import {
   labelId,
   labelPins,
   placePill,
+  pillCandidates,
   placePills,
   planLabels,
   planPins,
   projectPoint,
+  ROUTE_LINE_WIDTH,
+  routeOverlap,
   viewportFromRegion,
 } from '../src/lib/location-plan.ts';
 
@@ -180,8 +183,9 @@ const SIZE = { width: 370, height: 360 };
 const TOP_BAND = 88;
 const BOTTOM_LIMIT = SIZE.height - 42;
 
-test('labelAnchor: above puts the pill bottom 3 pt over the balloon top (44 pt) or the photo top (25 pt)', () => {
-  assert.deepEqual(labelAnchor('marker', 1, 'above'), { x: 0.5, y: 1 + 47 / 30 });
+// G4 qa: the balloon measured ~33 pt on iOS 26.5, so it is modelled 36 pt tall (was 44).
+test('labelAnchor: above puts the pill bottom 3 pt over the balloon top (36 pt) or the photo top (25 pt)', () => {
+  assert.deepEqual(labelAnchor('marker', 1, 'above'), { x: 0.5, y: 1 + 39 / 30 });
   assert.deepEqual(labelAnchor('photo', 2, 'above'), { x: 0.5, y: 1 + 28 / 50 });
   assert.deepEqual(labelAnchor('photo', 2, 'below'), labelAnchor('photo', 2));
 });
@@ -206,7 +210,7 @@ test('placePill: above the highest pin when the bottom band leaves no room below
   const plan = placePill([at('a', 100, 280), at('b', 120, 250)], SIZE);
   assert.equal(plan.placement, 'above');
   assert.equal(plan.pin.id, 'b');
-  assert.ok(plan.rect.top >= TOP_BAND && plan.rect.bottom === 250 - 44 - 3, JSON.stringify(plan.rect));
+  assert.ok(plan.rect.top >= TOP_BAND && plan.rect.bottom === 250 - 36 - 3, JSON.stringify(plan.rect));
 });
 
 test('placePill: near the right edge it reaches left instead of running off the map', () => {
@@ -244,6 +248,89 @@ test('placePills: worst case, a crowd with no clear spot overlaps and the overla
   const plans = placePills(groups, small);
   assert.equal(plans.length, 6, 'every group keeps a pill');
   assert.ok(countOverlaps(groups, plans) > 0);
+});
+
+// G4 (#5): the drawn route is an obstacle for the pills.
+const pt = (x, y) => ({ x, y });
+const PAD = 4 + ROUTE_LINE_WIDTH / 2; // LABEL_GROUP_MARGIN + half the line
+
+test('routeOverlap: the covered line area, with the margin; 0 when the line misses', () => {
+  const rect = { left: 0, right: 10, top: 0, bottom: 10 };
+  const near = (a, b, label) => assert.ok(Math.abs(a - b) < 1e-9, `${label}: ${a} vs ${b}`);
+  near(routeOverlap(rect, [pt(-100, 5), pt(100, 5)]), (10 + 2 * PAD) * ROUTE_LINE_WIDTH, 'horizontal');
+  near(routeOverlap(rect, [pt(5, -100), pt(5, 100)]), (10 + 2 * PAD) * ROUTE_LINE_WIDTH, 'vertical');
+  assert.equal(routeOverlap(rect, [pt(-100, 10 + PAD + 1), pt(100, 10 + PAD + 1)]), 0, 'passes just outside the margin');
+  assert.equal(routeOverlap(rect, [pt(-100, 50), pt(-50, 50), pt(-50, -50)]), 0, 'a bend that never enters');
+  assert.equal(routeOverlap(rect, [pt(5, 5)]), 0, 'a single point draws no line');
+  assert.equal(routeOverlap(rect, []), 0);
+  // Two segments meeting inside count both parts.
+  near(routeOverlap(rect, [pt(-100, 5), pt(5, 5), pt(5, 100)]), (5 + PAD) * 2 * ROUTE_LINE_WIDTH, 'bend inside');
+});
+
+test('placePill: a route under the pin moves the pill above it; without the route it stays below', () => {
+  const pins = [at('a', 100, 200)];
+  const route = [pt(0, 220), pt(370, 220)];
+  assert.equal(placePills([pins], SIZE)[0].placement, 'below');
+  const plan = placePills([pins], SIZE, route)[0];
+  assert.equal(plan.placement, 'above');
+  assert.equal(routeOverlap(plan.rect, route), 0);
+});
+
+test('placePill: a route crossing only the centred pill picks a reaching one that clears it', () => {
+  // A vertical line right of the pin's body crosses the centred and right-reaching pills, not the left-reaching one.
+  const pins = [at('a', 200, 200)];
+  const route = [pt(232, 120), pt(232, 300)];
+  const plan = placePills([pins], SIZE, route)[0];
+  assert.equal(plan.placement, 'below');
+  assert.equal(plan.align, 'left');
+  assert.equal(routeOverlap(plan.rect, route), 0);
+});
+
+test('placePills: a route through the bands below and above leaves the pill beside the pin, clear of it', () => {
+  const pins = [at('a', 100, 200)];
+  const route = [pt(0, 220), pt(370, 220), pt(370, 137), pt(80, 137)];
+  const plan = placePills([pins], SIZE, route)[0];
+  assert.equal(routeOverlap(plan.rect, route), 0);
+  assert.ok(plan.placement === 'east' || plan.placement === 'west', plan.placement);
+});
+
+test('placePills: when the route crosses every candidate, the pill still shows and hides the least line', () => {
+  const pins = [at('a', 100, 200)];
+  // A box around the pin (below, above) with walls on both sides of it (beside).
+  const route = [pt(0, 137), pt(370, 137), pt(370, 220), pt(0, 220), pt(50, 220), pt(50, 137), pt(150, 137), pt(150, 220)];
+  const plans = placePills([pins], SIZE, route);
+  assert.equal(plans.length, 1);
+  const cost = (r) => routeOverlap(r, route);
+  const best = Math.min(...pillCandidates(pins).map((c) => cost(c.rect)));
+  assert.ok(cost(plans[0].rect) > 0, 'nothing is clear');
+  assert.ok(Math.abs(cost(plans[0].rect) - best) < 1e-6, `${cost(plans[0].rect)} vs ${best}`);
+});
+
+test('placePills: a route away from the pills changes nothing', () => {
+  const groups = groupPins([at('a', 150, 150), at('b', 230, 150)]);
+  const route = [pt(0, 260), pt(370, 260)];
+  assert.deepEqual(placePills(groups, SIZE, route), placePills(groups, SIZE));
+  const plans = placePills(groups, SIZE, route);
+  assert.equal(countOverlaps(groups, plans), 0);
+  for (const plan of plans) assert.equal(routeOverlap(plan.rect, route), 0, plan.pin.id);
+});
+
+test('planLabels: no route, a one-point route and an invalid route place the same as before', () => {
+  const view = { center: { latitude: 34.049, longitude: -118.251 }, scale: 131098, bearing: 0 };
+  const pins = [{ id: 'a', coordinates: { latitude: 34.049, longitude: -118.251 }, shape: 'marker', text: 'A', stale: false }];
+  const base = JSON.stringify(planLabels(pins, view, SIZE));
+  assert.equal(JSON.stringify(planLabels(pins, view, SIZE, [{ latitude: 34.0485, longitude: -118.251 }])), base);
+  assert.equal(JSON.stringify(planLabels(pins, view, SIZE, [{ latitude: 95, longitude: 0 }, { latitude: NaN, longitude: 1 }])), base);
+});
+
+test('planLabels: a route drawn through the spot under the pin flips the pill above', () => {
+  const view = { center: { latitude: 34.049, longitude: -118.251 }, scale: 131098, bearing: 0 };
+  const pins = [{ id: 'a', coordinates: { latitude: 34.049, longitude: -118.251 }, shape: 'marker', text: 'A', stale: false }];
+  assert.equal(planLabels(pins, view, SIZE)[0].placement, 'below');
+  // ~20 pt below the pin on screen, east-west across the whole view.
+  const lat = 34.049 - (20 / 131098) * Math.cos((34.049 * Math.PI) / 180); // mercatorY is in degrees
+  const route = [{ latitude: lat, longitude: -118.27 }, { latitude: lat, longitude: -118.23 }];
+  assert.equal(planLabels(pins, view, SIZE, route)[0].placement, 'above');
 });
 
 // Replays of the room map logged during qa's (B) repro on 2026-11-07 (docs/evidence/2026-11-07-p2dbg-2-zoom-pan.png).

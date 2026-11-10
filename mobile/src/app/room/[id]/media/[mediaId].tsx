@@ -3,21 +3,29 @@ import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { useCallback, useState } from 'react';
-import { ActivityIndicator, Alert, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Alert, Share, StyleSheet, Text, View } from 'react-native';
 
-import { Button, colors, Hint, Screen } from '@/components/ui';
+import { SavedCard } from '@/components/media-cards';
+import { QScreen } from '@/components/q-screen';
+import { RoomEnded } from '@/components/room-ended';
+import { Button, colors, Hint } from '@/components/ui';
 import { en } from '@/i18n/en';
 import { useAuth } from '@/lib/auth';
 import { errorMessage } from '@/lib/errors';
 import { excludeFaceMatch, myVisibleMatch } from '@/lib/face';
-import { authHeaders, downloadOriginal, formatBytes, getMedia, type Media, objectUrl, saveOriginal } from '@/lib/media';
-import { listMembers } from '@/lib/rooms';
+import { authHeaders, discardDownload, downloadOriginal, formatBytes, getMedia, type Media, objectUrl, saveOriginal } from '@/lib/media';
+import { mediaTitle, noteSaved, sharedAge } from '@/lib/media-plan';
+import { useRoomEvents } from '@/lib/room-channel';
+import { getRoom, listMembers, type Room } from '@/lib/rooms';
+import { useNow } from '@/lib/use-now';
+import { useRoomOver } from '@/lib/use-room-over';
 
 type State =
   | { status: 'loading' }
   | { status: 'missing' }
+  | { status: 'gone' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; media: Media; uploader: string; matchEnrollment: string | null };
+  | { status: 'ready'; room: Room; media: Media; uploader: string; matchEnrollment: string | null };
 
 export default function MediaScreen() {
   const { id, mediaId } = useLocalSearchParams<{ id: string; mediaId: string }>();
@@ -28,7 +36,12 @@ export default function MediaScreen() {
 
   const load = useCallback(async () => {
     try {
-      const media = await getMedia(mediaId);
+      // G-U6-1: with the room row, a room that ended or expired shows Room ended, not "not found" with Retry.
+      const [room, media] = await Promise.all([getRoom(id), getMedia(mediaId)]);
+      if (!room) {
+        setState({ status: 'gone' });
+        return;
+      }
       if (!media || media.status !== 'ready') {
         setState({ status: 'missing' });
         return;
@@ -43,7 +56,7 @@ export default function MediaScreen() {
       // "Not me" is offered only for a photo currently in my Photos of me.
       const matchEnrollment =
         media.kind === 'photo' && userId ? await myVisibleMatch(id, userId, media.id).catch(() => null) : null;
-      setState({ status: 'ready', media, uploader, matchEnrollment });
+      setState({ status: 'ready', room, media, uploader, matchEnrollment });
     } catch (e) {
       setState({ status: 'error', message: errorMessage(e) });
     }
@@ -55,20 +68,34 @@ export default function MediaScreen() {
     }, [load]),
   );
 
+  // G-U6-1, as Chat: a host's End or a removal arrives as a rooms / room_members notice.
+  useRoomEvents(id, (event) => {
+    if (event.table === 'rooms' || event.table === 'room_members') load();
+  });
+  const ended = useRoomOver(state.status === 'ready' ? state.room : null);
+
   if (state.status === 'loading') {
     return (
-      <Screen>
-        <ActivityIndicator />
-      </Screen>
+      <QScreen>
+        <ActivityIndicator style={styles.loading} />
+      </QScreen>
+    );
+  }
+  // No Save original or Share once the room is over: the server copy is deleted with it.
+  if (state.status === 'gone' || ended.over) {
+    return (
+      <>
+        <Stack.Screen options={{ title: '' }} />
+        <RoomEnded room={state.status === 'ready' ? state.room : null} nowMs={ended.nowMs} />
+      </>
     );
   }
   if (state.status !== 'ready' || !token) {
     return (
-      <Screen>
+      <QScreen actions={<Button title={en.home.retry} variant="secondary" onPress={load} />}>
         <Stack.Screen options={{ title: '' }} />
         <Hint tone="error">{state.status === 'error' ? state.message : en.media.notFound}</Hint>
-        <Button title={en.home.retry} variant="secondary" onPress={load} />
-      </Screen>
+      </QScreen>
     );
   }
 
@@ -83,6 +110,12 @@ export default function MediaScreen() {
   );
 }
 
+/**
+ * Qrew unit 5 (Q 05.03): the title is what the item is (Video, Photo, or a file's own name: the app has no
+ * titles), "Shared by <name> · <age>" under it, the media, then pinned "Save original" (download, verify size and
+ * SHA-256, save: unchanged) and "Share" (the same verified download, then the share sheet). After a save the
+ * "Original saved" card shows here and once on the gallery (Q 05.04).
+ */
 function MediaDetail({
   media,
   uploader,
@@ -96,29 +129,79 @@ function MediaDetail({
   matchEnrollment: string | null;
   onExcluded: () => void;
 }) {
+  const now = useNow(30_000);
   const [download, setDownload] = useState<
-    { status: 'idle' } | { status: 'busy'; pct: number } | { status: 'done'; message: string } | { status: 'error'; message: string }
+    | { status: 'idle' }
+    | { status: 'busy'; action: 'save' | 'share'; pct: number }
+    | { status: 'done'; message: string }
+    | { status: 'error'; message: string }
   >({ status: 'idle' });
+  const [saved, setSaved] = useState(false);
 
   async function onDownload() {
-    setDownload({ status: 'busy', pct: 0 });
+    setDownload({ status: 'busy', action: 'save', pct: 0 });
     try {
-      const result = await downloadOriginal(media, (f) => setDownload({ status: 'busy', pct: Math.round(f * 100) }));
-      const saved = await saveOriginal(media, result.file);
+      const result = await downloadOriginal(media, (f) => setDownload({ status: 'busy', action: 'save', pct: Math.round(f * 100) }));
+      const savedTo = await saveOriginal(media, result.file);
       const verified = en.media.verified(formatBytes(result.bytes));
-      setDownload(
-        saved === 'cancelled'
-          ? { status: 'idle' }
-          : { status: 'done', message: `${saved === 'library' ? en.media.savedToPhotos : en.media.savedFile} ${verified}` },
-      );
+      if (savedTo === 'cancelled') {
+        setDownload({ status: 'idle' });
+        return;
+      }
+      setSaved(true);
+      noteSaved(media.room_id);
+      setDownload({ status: 'done', message: `${savedTo === 'library' ? en.media.savedToPhotos : en.media.savedFile} ${verified}` });
     } catch (e) {
       setDownload({ status: 'error', message: errorMessage(e) });
+    } finally {
+      discardDownload(media);
     }
   }
 
+  // Worklist gap 4: Share sends the verified original (same download as Save) through the system share sheet.
+  async function onShare() {
+    setDownload({ status: 'busy', action: 'share', pct: 0 });
+    try {
+      const result = await downloadOriginal(media, (f) => setDownload({ status: 'busy', action: 'share', pct: Math.round(f * 100) }));
+      await Share.share({ url: result.file.uri, title: media.file_name });
+      setDownload({ status: 'idle' });
+    } catch (e) {
+      setDownload({ status: 'error', message: errorMessage(e) });
+    } finally {
+      // Share.share resolves after the sheet closes, when the target has its own copy.
+      discardDownload(media);
+    }
+  }
+
+  const busy = download.status === 'busy';
+  const title = mediaTitle(media, { video: en.media.video, photo: en.media.photo });
+  const size = formatBytes(media.size_bytes);
+  const age = sharedAge(media.created_at, now);
+
   return (
-    <Screen>
-      <Stack.Screen options={{ title: media.kind === 'video' ? en.media.video : media.kind === 'file' ? en.media.file : '' }} />
+    <QScreen
+      title={title}
+      subtitle={age ? en.media.sharedByAge(uploader, en.media.age(age.n, age.unit)) : en.media.sharedBy(uploader)}
+      actions={
+        <>
+          {download.status === 'error' ? <Hint tone="error">{download.message}</Hint> : null}
+          <Button
+            title={busy && download.action === 'save' ? en.media.downloading(download.pct) : en.media.saveOriginal}
+            onPress={onDownload}
+            busy={busy && download.action === 'save' && download.pct === 0}
+            disabled={busy}
+          />
+          <Button
+            title={busy && download.action === 'share' ? en.media.downloading(download.pct) : en.media.share}
+            variant="secondary"
+            onPress={onShare}
+            busy={busy && download.action === 'share' && download.pct === 0}
+            disabled={busy}
+          />
+        </>
+      }
+    >
+      <Stack.Screen options={{ title, headerTitle: '' }} />
       {media.kind === 'photo' ? (
         <Image
           source={{ uri: objectUrl(media.original_path), headers: authHeaders(token), cacheKey: media.original_path }}
@@ -140,23 +223,12 @@ function MediaDetail({
         </View>
       )}
 
-      <View style={styles.meta}>
-        <Text style={styles.name} selectable>
-          {media.file_name}
-        </Text>
-        <Text style={styles.sub}>
-          {en.media.sharedBy(uploader)} · {formatBytes(media.size_bytes)} · {new Date(media.created_at).toLocaleString()}
-        </Text>
-      </View>
+      <Text style={styles.sub} selectable>
+        {size ? `${media.file_name} · ${size}` : media.file_name} · {new Date(media.created_at).toLocaleString()}
+      </Text>
 
-      <Button
-        title={download.status === 'busy' ? en.media.downloading(download.pct) : en.media.download}
-        onPress={onDownload}
-        busy={download.status === 'busy' && download.pct === 0}
-        disabled={download.status === 'busy'}
-      />
+      {saved ? <SavedCard /> : null}
       {download.status === 'done' ? <Hint>{download.message}</Hint> : null}
-      {download.status === 'error' ? <Hint tone="error">{download.message}</Hint> : null}
       {matchEnrollment ? (
         <Button
           title={en.face.notMe}
@@ -179,7 +251,7 @@ function MediaDetail({
           }
         />
       ) : null}
-    </Screen>
+    </QScreen>
   );
 }
 
@@ -202,7 +274,6 @@ const styles = StyleSheet.create({
     borderCurve: 'continuous',
     backgroundColor: colors.field,
   },
-  meta: { gap: 4 },
-  name: { fontSize: 17, fontWeight: '600', color: colors.label },
+  loading: { marginTop: 48 },
   sub: { fontSize: 13, color: colors.secondaryLabel },
 });

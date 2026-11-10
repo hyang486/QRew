@@ -10,6 +10,7 @@ import {
   FRESH_FIX_TIMEOUT_MS,
   freshFixAttemptDue,
   HEARTBEAT_MS,
+  memberStatusLabels,
   heartbeatDue,
   isFreshReading,
   initials,
@@ -165,6 +166,24 @@ test('planPins: a pin going stale changes marker identity and says so (F6-1)', (
   assert.notEqual(stale.id, fresh.id);
   assert.match(stale.title, /stale/);
   assert.doesNotMatch(stale.title, /km\/h/);
+});
+
+test('planPins: a member status comes last, fresh or stale, and keeps the pin id (#2)', () => {
+  const fresh = planPins([pin({ status: 'Need water' })], NOW, new Map())[0];
+  assert.equal(fresh.title, 'Test joiner · 7.2 km/h · Need water');
+  assert.equal(fresh.id, 'u1');
+  const stale = planPins([pin({ status: 'Need water', updatedAt: OLD })], NOW, new Map(), 'stale')[0];
+  assert.equal(stale.title, 'Test joiner · stale · Need water');
+  assert.equal(stale.id, 'u1:stale');
+  assert.equal(planPins([pin({ status: null })], NOW, new Map())[0].title, 'Test joiner · 7.2 km/h');
+});
+
+test('memberStatusLabels maps members to their status label and skips unknown statuses (#2)', () => {
+  const labels = memberStatusLabels(
+    new Map([['u1', 's1'], ['u2', 'gone'], ['u3', 's2']]),
+    [{ id: 's1', label: 'Need water' }, { id: 's2', label: 'Emergency' }],
+  );
+  assert.deepEqual([...labels], [['u1', 'Need water'], ['u3', 'Emergency']]);
 });
 
 test('wantedIconPaths holds only fresh pins with a photo', () => {

@@ -6,7 +6,6 @@ export default function SignUp() {
   return (
     <HostAccountForm
       mode="sign-up"
-      hint={en.signUp.hint}
       submitTitle={en.signUp.submit}
       onSubmit={async ({ email, password, name }) => {
         const { needsConfirmation } = await signUpHost(email, password, name);

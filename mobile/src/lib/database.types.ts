@@ -596,7 +596,11 @@ export type Database = {
           location_allowed: boolean
           max_members: number
           name: string
+          place_lat: number | null
+          place_lng: number | null
+          place_name: string | null
           route: Json
+          starts_at: string | null
           type: string
         }
         Insert: {
@@ -615,7 +619,11 @@ export type Database = {
           location_allowed?: boolean
           max_members?: number
           name: string
+          place_lat?: number | null
+          place_lng?: number | null
+          place_name?: string | null
           route?: Json
+          starts_at?: string | null
           type?: string
         }
         Update: {
@@ -634,7 +642,11 @@ export type Database = {
           location_allowed?: boolean
           max_members?: number
           name?: string
+          place_lat?: number | null
+          place_lng?: number | null
+          place_name?: string | null
           route?: Json
+          starts_at?: string | null
           type?: string
         }
         Relationships: []
@@ -683,6 +695,10 @@ export type Database = {
           p_expires_at: string
           p_location_allowed: boolean
           p_name: string
+          p_place_lat?: number
+          p_place_lng?: number
+          p_place_name?: string
+          p_starts_at?: string
           p_statuses?: string[]
           p_type: string
         }
@@ -702,7 +718,11 @@ export type Database = {
           location_allowed: boolean
           max_members: number
           name: string
+          place_lat: number | null
+          place_lng: number | null
+          place_name: string | null
           route: Json
+          starts_at: string | null
           type: string
         }
         SetofOptions: {
@@ -731,7 +751,11 @@ export type Database = {
           max_members: number
           member_count: number
           name: string
+          place_lat: number | null
+          place_lng: number | null
+          place_name: string | null
           room_id: string
+          starts_at: string | null
           type: string
         }[]
       }
@@ -805,7 +829,11 @@ export type Database = {
           location_allowed: boolean
           max_members: number
           name: string
+          place_lat: number | null
+          place_lng: number | null
+          place_name: string | null
           route: Json
+          starts_at: string | null
           type: string
         }
         SetofOptions: {

@@ -3,23 +3,37 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, StyleSheet, Text, View } from 'react-native';
 
 import { Avatar } from '@/components/avatar';
+import { RoomEmergencyBanner } from '@/components/room-activity';
+import { PlaceTimeCards } from '@/components/place-time-cards';
+import { RoomEnded } from '@/components/room-ended';
 import { StatusEditor } from '@/components/status-editor';
-import { Button, colors, Hint, Screen } from '@/components/ui';
+import { QLink, QScreen } from '@/components/q-screen';
+import { QRowCard } from '@/components/q-row-card';
+import { Button, colors, Hint } from '@/components/ui';
 import { en } from '@/i18n/en';
 import { useAuth } from '@/lib/auth';
+import { endsDay } from '@/lib/chat-plan';
 import { errorMessage } from '@/lib/errors';
 import { clearRoomCache } from '@/lib/media';
 import { useRoomEvents } from '@/lib/room-channel';
 import { cancelExpiryReminder } from '@/lib/expiry-reminders';
-import { endRoom, getRoom, leaveRoom, listMembers, type Room, type RoomMember } from '@/lib/rooms';
+import { arrivedMemberCount } from '@/lib/info-plan';
+import { placeTimeOf } from '@/lib/place-time';
+import { getRoom, leaveRoom, listArrivedIds, listMembers, type Room, type RoomMember } from '@/lib/rooms';
+import { useNow } from '@/lib/use-now';
+import { useRoomOver } from '@/lib/use-room-over';
 
 type State =
   | { status: 'loading' }
   | { status: 'gone' }
   | { status: 'error'; message: string }
-  | { status: 'ready'; room: Room; members: RoomMember[] };
+  | { status: 'ready'; room: Room; members: RoomMember[]; arrived: string[] | null };
 
-/** Members, room details and Leave/End. Reached from the room chat header. */
+/**
+ * Members, room details and Leave/End. Reached from the room chat header. Qrew unit 5 (Q 03.03): title and cards;
+ * members under View participants, status editing under Edit status options (host), and the red End room (host)
+ * or Leave room (guest) text button at the bottom.
+ */
 export default function RoomInfoScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -27,6 +41,9 @@ export default function RoomInfoScreen() {
   const userId = session?.user.id;
   const [state, setState] = useState<State>({ status: 'loading' });
   const [busy, setBusy] = useState(false);
+  const [showMembers, setShowMembers] = useState(false);
+  const [editingStatus, setEditingStatus] = useState(false);
+  const now = useNow(30_000);
 
   const load = useCallback(async () => {
     try {
@@ -35,7 +52,12 @@ export default function RoomInfoScreen() {
         setState({ status: 'gone' });
         return;
       }
-      setState({ status: 'ready', room, members: await listMembers(id) });
+      // Arrivals are extra: when they cannot be read, Info shows only the people count.
+      const [members, arrived] = await Promise.all([
+        listMembers(id),
+        listArrivedIds(id, room.activity_seq).catch(() => null),
+      ]);
+      setState({ status: 'ready', room, members, arrived });
     } catch (e) {
       setState({ status: 'error', message: errorMessage(e) });
     }
@@ -54,7 +76,7 @@ export default function RoomInfoScreen() {
     if (reloadTimer.current) clearTimeout(reloadTimer.current);
   }, []);
   useRoomEvents(id, (event) => {
-    if (event.table !== 'rooms' && event.table !== 'room_members') return;
+    if (event.table !== 'rooms' && event.table !== 'room_members' && event.table !== 'arrivals') return;
     if (reloadTimer.current) clearTimeout(reloadTimer.current);
     reloadTimer.current = setTimeout(() => {
       reloadTimer.current = null;
@@ -62,120 +84,149 @@ export default function RoomInfoScreen() {
     }, 300);
   });
 
+  // G-U6-1: the room's end time passing while Info is open (the host's End arrives as a rooms notice above).
+  const ended = useRoomOver(state.status === 'ready' ? state.room : null);
+
   if (state.status === 'loading') {
     return (
-      <Screen>
+      <QScreen>
         <ActivityIndicator style={styles.loading} />
-      </Screen>
+      </QScreen>
     );
   }
 
   if (state.status === 'gone') {
-    return (
-      <Screen>
-        <View style={styles.gone}>
-          <Text style={styles.goneTitle}>{en.room.gone}</Text>
-          <Hint>{en.room.goneHint}</Hint>
-        </View>
-        <Button title={en.room.backToRooms} onPress={() => router.dismissTo('/')} />
-      </Screen>
-    );
+    return <RoomEnded />;
+  }
+  // No stale member list, status editing or Leave/End once the room is over.
+  if (state.status === 'ready' && ended.over) {
+    return <RoomEnded room={state.room} nowMs={ended.nowMs ?? now} />;
   }
 
   if (state.status === 'error') {
     return (
-      <Screen>
+      <QScreen actions={<Button title={en.home.retry} variant="secondary" onPress={load} />}>
         <Hint tone="error">{state.message}</Hint>
-        <Button title={en.home.retry} variant="secondary" onPress={load} />
-      </Screen>
+      </QScreen>
     );
   }
 
-  const { room, members } = state;
+  const { room, members, arrived } = state;
   const isHost = room.host_id === userId;
+  const placeTime = placeTimeOf(room);
 
   function confirmLeave() {
-    Alert.alert(
-      isHost ? en.room.endConfirmTitle : en.room.leaveConfirmTitle,
-      isHost ? en.room.endConfirmBody : en.room.leaveConfirmBody,
-      [
-        { text: en.room.cancel, style: 'cancel' },
-        {
-          text: isHost ? en.room.end : en.room.leave,
-          style: 'destructive',
-          onPress: async () => {
-            setBusy(true);
-            try {
-              await (isHost ? endRoom(room.id) : leaveRoom(room.id));
-              cancelExpiryReminder(room.id);
-              clearRoomCache(room.id);
-              router.dismissTo('/');
-            } catch (e) {
-              setBusy(false);
-              Alert.alert(errorMessage(e));
-            }
-          },
+    // Qrew unit 4: the host's End room is a confirm screen that states the effects; guests keep the Leave alert.
+    if (isHost) {
+      router.push({ pathname: '/room/[id]/end-room', params: { id: room.id } });
+      return;
+    }
+    Alert.alert(en.room.leaveConfirmTitle, en.room.leaveConfirmBody, [
+      { text: en.room.cancel, style: 'cancel' },
+      {
+        text: en.room.leave,
+        style: 'destructive',
+        onPress: async () => {
+          setBusy(true);
+          try {
+            await leaveRoom(room.id);
+            cancelExpiryReminder(room.id);
+            clearRoomCache(room.id);
+            router.dismissTo('/');
+          } catch (e) {
+            setBusy(false);
+            Alert.alert(errorMessage(e));
+          }
         },
-      ],
-    );
+      },
+    ]);
   }
 
+  const expiresMs = new Date(room.expires_at).getTime();
+  const endsLine = en.room.endsOn(
+    endsDay(expiresMs, now),
+    new Date(expiresMs).toLocaleDateString([], { month: 'short', day: 'numeric' }),
+    new Date(expiresMs).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }),
+  );
+  // Q 03.03 "12 people · 8 arrived · View participants": arrivals of the current activity, current members only.
+  const arrivedCount = arrived === null ? null : arrivedMemberCount(members.map((m) => m.user_id), arrived);
+  const peopleSub = [
+    arrivedCount === null ? null : en.room.arrived(arrivedCount),
+    showMembers ? en.room.hideParticipants : en.room.viewParticipants,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   return (
-    <Screen>
-      <View style={styles.header}>
-        <Text style={styles.name} accessibilityRole="header">
-          {room.name}
-        </Text>
-        <Hint>{en.room.endsAt(new Date(room.expires_at).toLocaleString())}</Hint>
-      </View>
-
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>{en.room.membersCount(members.length)}</Text>
-        {members.map((m) => (
-          <View key={m.user_id} style={styles.member}>
-            <Avatar path={m.avatar_path} name={m.display_name} />
-            <Text style={styles.memberName} numberOfLines={1}>
-              {m.display_name}
-            </Text>
-            <Text style={styles.memberTag}>
-              {[m.role === 'host' ? en.room.host : null, m.user_id === userId ? en.room.you : null]
-                .filter(Boolean)
-                .join(' · ')}
-            </Text>
-          </View>
-        ))}
-      </View>
-
-      <StatusEditor roomId={room.id} isHost={isHost} />
-
-      <Button
-        title={isHost ? en.room.end : en.room.leave}
-        variant="destructive"
-        busy={busy}
-        onPress={confirmLeave}
+    <QScreen
+      title={room.name}
+      subtitle={en.room.infoSubtitle(isHost)}
+      actions={
+        <>
+          {isHost ? (
+            <Button
+              title={editingStatus ? en.room.doneEditingStatus : en.room.editStatusOptions}
+              variant="secondary"
+              onPress={() => setEditingStatus((v) => !v)}
+            />
+          ) : null}
+          {busy ? (
+            <ActivityIndicator style={styles.leaveBusy} accessibilityLabel={en.room.leave} />
+          ) : (
+            <QLink title={isHost ? en.room.end : en.room.leave} tone="danger" onPress={confirmLeave} />
+          )}
+        </>
+      }
+    >
+      <RoomEmergencyBanner roomId={room.id} />
+      <QRowCard
+        icon="person.2"
+        title={en.room.people(members.length)}
+        subtitle={peopleSub}
+        onPress={() => setShowMembers((v) => !v)}
+        expanded={showMembers}
       />
-    </Screen>
+      {showMembers ? (
+        <View style={styles.members}>
+          {members.map((m) => (
+            <View key={m.user_id} style={styles.member}>
+              <Avatar path={m.avatar_path} name={m.display_name} />
+              <Text style={styles.memberName} numberOfLines={1}>
+                {m.display_name}
+              </Text>
+              <Text style={styles.memberTag}>
+                {[m.role === 'host' ? en.room.host : null, m.user_id === userId ? en.room.you : null]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+      <QRowCard icon="clock" title={endsLine} subtitle={en.room.endsSoonInfo} />
+      {/* Place and time (0026), only when the host set them: map, place + Open in Maps, start time. */}
+      {placeTime ? <PlaceTimeCards placeTime={placeTime} /> : null}
+
+      <View style={styles.statuses}>
+        <StatusEditor roomId={room.id} isHost={isHost} editing={editingStatus} />
+      </View>
+    </QScreen>
   );
 }
 
 const styles = StyleSheet.create({
   loading: { marginTop: 48 },
-  header: { gap: 4 },
-  name: { fontSize: 22, fontWeight: '700', color: colors.label },
-  section: { gap: 8 },
-  sectionTitle: { fontSize: 13, color: colors.secondaryLabel, textTransform: 'uppercase' },
+  leaveBusy: { minHeight: 40 },
+  members: { gap: 6 },
   member: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    backgroundColor: colors.field,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
     gap: 10,
   },
   memberName: { flex: 1, fontSize: 17, color: colors.label },
   memberTag: { fontSize: 14, color: colors.secondaryLabel },
-  gone: { paddingVertical: 48, alignItems: 'center', gap: 8 },
-  goneTitle: { fontSize: 20, fontWeight: '600', color: colors.label },
+  statuses: { marginTop: 12 },
 });

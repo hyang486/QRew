@@ -1,11 +1,13 @@
 import { FunctionsHttpError } from '@supabase/supabase-js';
 import { randomUUID } from 'expo-crypto';
+import * as Device from 'expo-device';
 import { Directory, File, Paths } from 'expo-file-system';
 import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
 import * as ImagePicker from 'expo-image-picker';
 
 import { en } from '@/i18n/en';
 
+import { CameraError, cameraStep } from './camera-plan';
 import {
   classifyDetectUpload,
   classifyMatchRun,
@@ -40,8 +42,11 @@ export async function pickFaceReference(source: 'camera' | 'library'): Promise<s
   const options: ImagePicker.ImagePickerOptions = { mediaTypes: ['images'], quality: 1, exif: false };
   let result: ImagePicker.ImagePickerResult;
   if (source === 'camera') {
+    // Same guard as takePhoto (G9 F1): a simulator has no camera, and launching it there is an uncatchable
+    // ObjC crash ('Source type 1 not available'), so nothing native is called.
+    if (cameraStep(Device.isDevice) === 'unavailable') throw new CameraError(en.face.cameraUnavailable);
     const perm = await ImagePicker.requestCameraPermissionsAsync();
-    if (!perm.granted) throw new Error(en.face.cameraDenied);
+    if (!perm.granted) throw new CameraError(en.face.cameraDenied);
     result = await ImagePicker.launchCameraAsync(options);
   } else {
     result = await ImagePicker.launchImageLibraryAsync(options);

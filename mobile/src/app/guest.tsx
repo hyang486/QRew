@@ -1,10 +1,14 @@
 import { useState } from 'react';
 
-import { Button, Field, Hint, Screen } from '@/components/ui';
+import { InkArt } from '@/components/ink-art';
+import { QField, QScreen } from '@/components/q-screen';
+import { Button, Hint } from '@/components/ui';
 import { en } from '@/i18n/en';
 import { startAsGuest } from '@/lib/auth';
 import { errorMessage } from '@/lib/errors';
 
+// Qrew Q 02.01: "What's your name?", the display name field, who sees it, the gate art, and Join as guest
+// pinned at the bottom (above the keyboard while typing). The name rule is unchanged (startAsGuest).
 export default function Guest() {
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
@@ -23,11 +27,19 @@ export default function Guest() {
   }
 
   return (
-    <Screen>
-      <Hint>{en.welcome.guestHint}</Hint>
-      <Field
-        label={en.guest.nameLabel}
-        placeholder={en.guest.namePlaceholder}
+    <QScreen
+      title={en.guest.title}
+      bottom={<InkArt art="gate" width={170} />}
+      bottomAlign="center"
+      actions={
+        <>
+          {error && <Hint tone="error">{error}</Hint>}
+          <Button title={en.guest.submit} onPress={submit} busy={busy} />
+        </>
+      }
+    >
+      <QField
+        label={en.fields.name}
         value={name}
         onChangeText={setName}
         maxLength={40}
@@ -36,8 +48,7 @@ export default function Guest() {
         returnKeyType="go"
         onSubmitEditing={submit}
       />
-      {error && <Hint tone="error">{error}</Hint>}
-      <Button title={en.guest.submit} onPress={submit} busy={busy} />
-    </Screen>
+      <Hint>{en.guest.who}</Hint>
+    </QScreen>
   );
 }

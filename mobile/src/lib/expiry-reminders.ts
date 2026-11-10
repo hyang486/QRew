@@ -1,7 +1,8 @@
 // Local and in-app 24-hour expiry reminder (APP_CONCEPT_KO "방 만료 1일 전 알림").
 //
 // This milestone has no remote push (no paid Apple account; USER_DECISIONS notifications), so:
-// - each device schedules a LOCAL notification at expires_at - 24h for the rooms it can open, and
+// - each device schedules a LOCAL notification when the in-room banner starts (expires_at - 24 h, or
+//   G6b: - 1 h for rooms under 24 h; expiry-plan endsSoonWindowMs) for the rooms it can open, and
 //   reschedules when the host changes the expiry (rooms change notice -> room reload -> sync);
 // - while the room is open, the server's reminder broadcast (migration 0019) is shown in the app.
 // A device that never opens the app after the room is created or the expiry changes cannot get a
@@ -12,11 +13,13 @@ import { en } from '@/i18n/en';
 
 import {
   isReminderData,
+  showEndsSoon,
   planReminders,
   type ReminderData,
   type ReminderRoom,
   reminderId,
   REMINDER_ID_PREFIX,
+  REMINDER_WINDOW_MS,
 } from './expiry-plan';
 import { formatRemaining } from './rooms';
 import { supabase } from './supabase';
@@ -30,8 +33,13 @@ Notifications.setNotificationHandler({
   }),
 });
 
-function dataFor(room: ReminderRoom): ReminderData {
-  return { kind: 'expiry', roomId: room.id, expiryVersion: room.expiry_version, expiresAt: room.expires_at };
+/** G6b: the reminder fires in the room's last hour (a room under 24 h), not 24 h before. */
+function lastHour(room: ReminderRoom, fireAt: number) {
+  return new Date(room.expires_at).getTime() - fireAt < REMINDER_WINDOW_MS;
+}
+
+function dataFor(room: ReminderRoom, fireAt?: number): ReminderData {
+  return { kind: 'expiry', roomId: room.id, expiryVersion: room.expiry_version, expiresAt: room.expires_at, fireAt };
 }
 
 /** Asks once (iOS shows its own prompt). Returns whether local notifications may be shown. */
@@ -61,9 +69,9 @@ export async function syncExpiryReminders(rooms: ReminderRoom[], complete: boole
         Notifications.scheduleNotificationAsync({
           identifier,
           content: {
-            title: en.reminder.title,
-            body: en.reminder.body(room.name),
-            data: dataFor(room),
+            title: lastHour(room, fireAt) ? en.reminder.titleLastHour : en.reminder.title,
+            body: lastHour(room, fireAt) ? en.reminder.bodyLastHour(room.name) : en.reminder.body(room.name),
+            data: dataFor(room, fireAt),
           },
           trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: fireAt },
         }),
@@ -107,6 +115,9 @@ const shown = new Set<string>();
  */
 export async function presentServerReminder(room: ReminderRoom, expiryVersion: number | undefined) {
   if (expiryVersion !== room.expiry_version) return;
+  // G6b: only inside the banner window. Rows written by 0019 before 0025 (a short room reminded at creation)
+  // would otherwise still alert while the banner is hidden.
+  if (!showEndsSoon(room.created_at, room.expires_at, Date.now())) return;
   const key = `${room.id}:${expiryVersion}`;
   if (shown.has(key)) return;
   try {

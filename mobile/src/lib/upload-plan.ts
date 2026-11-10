@@ -79,3 +79,27 @@ export function roomSummary(jobs: readonly QueueJob[], roomId: string): RoomUplo
 export function isAbortError(e: unknown): boolean {
   return typeof e === 'object' && e !== null && (e as { name?: unknown }).name === 'AbortError';
 }
+
+// #8: one chat line per finished upload batch.
+
+/** True when the room has nothing queued or uploading (failed jobs wait for the user, so they don't count). */
+export function roomIdle(jobs: readonly QueueJob[], roomId: string): boolean {
+  return !jobs.some((j) => j.roomId === roomId && j.state !== 'failed');
+}
+
+const KIND_WORDS = { photo: ['a photo', 'photos'], video: ['a video', 'videos'], file: ['a file', 'files'] } as const;
+
+/**
+ * The stored body of the media chat line for a batch, without the sender's name: "shared 3 photos",
+ * "shared a file", "shared 2 photos and a video". Null for an empty batch (nothing is posted).
+ */
+export function sharedBody(kinds: readonly ('photo' | 'video' | 'file')[]): string | null {
+  const parts = (['photo', 'video', 'file'] as const).flatMap((kind) => {
+    const n = kinds.filter((k) => k === kind).length;
+    if (n === 0) return [];
+    return [n === 1 ? KIND_WORDS[kind][0] : `${n} ${KIND_WORDS[kind][1]}`];
+  });
+  if (parts.length === 0) return null;
+  const list = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+  return `shared ${list}`;
+}

@@ -1,10 +1,15 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
 
-import { Button, colors, Hint, Screen } from '@/components/ui';
+import { InkArt } from '@/components/ink-art';
+import { PlaceTimeCards } from '@/components/place-time-cards';
+import { QCaption, QScreen } from '@/components/q-screen';
+import { Button, Hint } from '@/components/ui';
 import { en } from '@/i18n/en';
+import { formatDeletedAt } from '@/lib/create-defaults';
 import { errorMessage } from '@/lib/errors';
+import { placeTimeOf } from '@/lib/place-time';
 import {
   joinRoom,
   previewRoom,
@@ -13,6 +18,7 @@ import {
   type RoomPreview,
 } from '@/lib/rooms';
 import { useNow } from '@/lib/use-now';
+import { useRoomOver } from '@/lib/use-room-over';
 
 export default function Preview() {
   const router = useRouter();
@@ -53,57 +59,83 @@ export default function Preview() {
     }
   }
 
-  if (!preview) {
+  // G-U6-1: the room's end time passing while the preview is open makes the invite unavailable (Join would fail).
+  const ended = useRoomOver(preview ? { deleted_at: null, expires_at: preview.expires_at } : null);
+  const unavailable = ended.over ? en.rooms.errors.invalid : preview ? null : error;
+
+  // Qrew Q 07.03: an invite that can't be previewed (invalid, ended, rotated, full, throttled) gets its own
+  // screen: "Invite unavailable", the same cause message as before, the paper art, then Enter a room code /
+  // Back to rooms. While loading, only a spinner.
+  if (!preview || ended.over) {
+    if (!unavailable) {
+      return (
+        <QScreen>
+          <ActivityIndicator style={styles.loading} />
+        </QScreen>
+      );
+    }
     return (
-      <Screen>
-        {error ? (
+      <QScreen
+        title={en.preview.unavailableTitle}
+        subtitle={unavailable}
+        bottom={<InkArt art="paper" width={190} />}
+        bottomAlign="center"
+        actions={
           <>
-            <Hint tone="error">{error}</Hint>
+            {/* N1: back to the code screen already in the stack (no join → join), or replace this with it. */}
+            <Button title={en.preview.enterCode} onPress={() => router.dismissTo('/join')} />
             <Button title={en.room.backToRooms} variant="secondary" onPress={() => router.dismissTo('/')} />
           </>
-        ) : (
-          <ActivityIndicator style={styles.loading} />
-        )}
-      </Screen>
+        }
+      />
     );
   }
 
   const expiresAt = new Date(preview.expires_at);
   const endsSoon = expiresAt.getTime() - now < REMINDER_WINDOW_MS;
+  const facts = `${en.preview.members(preview.member_count, preview.max_members)} · ${en.preview.endsAt(
+    formatDeletedAt(expiresAt.getTime()),
+  )}`;
 
+  const placeTime = placeTimeOf(preview);
+
+  // Q 01.04 (rule USER_DECISIONS:168, R6): title → map → place + Open in Maps → date and time → art, with Join
+  // pinned at the bottom and one caption under it. The art and note sit at the bottom of the body, directly
+  // above Join (qa b-run: under the title they left a large gap above Join). Map, place and time (0026) render
+  // only when the host set them: no pin → no map; no place and no time → nothing between title and art. Q's
+  // caption is "Guest name comes next."; here it carries the member count and end time so they stay reachable.
   return (
-    <Screen>
-      <View style={styles.card}>
-        <Text style={styles.name}>{preview.name}</Text>
-        <Text style={styles.meta}>
-          {en.rooms.types[preview.type as keyof typeof en.rooms.types] ?? preview.type}
-        </Text>
-        <Text style={styles.meta}>{en.preview.members(preview.member_count, preview.max_members)}</Text>
-        <Text style={styles.meta}>{en.preview.endsAt(expiresAt.toLocaleString())}</Text>
-      </View>
-      {endsSoon ? <Hint>{en.preview.endsSoon}</Hint> : null}
-      {error ? <Hint tone="error">{error}</Hint> : null}
-      {preview.already_member ? (
+    <QScreen
+      title={preview.name}
+      actions={
         <>
-          <Hint>{en.preview.alreadyMember}</Hint>
-          <Button title={en.preview.open} onPress={() => openRoom(preview.room_id)} />
+          {error ? <Hint tone="error">{error}</Hint> : null}
+          {preview.already_member ? (
+            <>
+              <Hint>{en.preview.alreadyMember}</Hint>
+              <Button title={en.preview.open} onPress={() => openRoom(preview.room_id)} />
+            </>
+          ) : (
+            <Button title={en.preview.join} onPress={join} busy={busy} />
+          )}
+          <QCaption>{facts}</QCaption>
         </>
-      ) : (
-        <Button title={en.preview.join} onPress={join} busy={busy} />
-      )}
-    </Screen>
+      }
+      bottom={
+        <>
+          <View style={styles.art}>
+            <InkArt roomName={preview.name} />
+          </View>
+          {endsSoon ? <Hint>{en.preview.endsSoon}</Hint> : null}
+        </>
+      }
+    >
+      {placeTime ? <PlaceTimeCards placeTime={placeTime} /> : null}
+    </QScreen>
   );
 }
 
 const styles = StyleSheet.create({
   loading: { marginTop: 48 },
-  card: {
-    backgroundColor: colors.field,
-    borderRadius: 14,
-    borderCurve: 'continuous',
-    padding: 20,
-    gap: 6,
-  },
-  name: { fontSize: 24, fontWeight: '700', color: colors.label },
-  meta: { fontSize: 16, color: colors.secondaryLabel, fontVariant: ['tabular-nums'] },
+  art: { paddingVertical: 12 },
 });

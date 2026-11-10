@@ -218,13 +218,12 @@ test('P2: viewportFromRegion reads the onCameraMove region; a heading turns the 
   assert.equal(viewportFromRegion({ coordinates: center, longitudeDelta: 0 }, size), null);
 });
 
-test('P2: roomMapPadding grows the bottom by a line per extra label line and the sides for a wide pill', () => {
+test('P2: roomMapPadding grows the bottom by a line per extra label line; G4: the sides stay fixed', () => {
   assert.deepEqual(roomMapPadding(1), ROOM_MAP_PADDING);
   assert.equal(roomMapPadding(4).bottom, ROOM_MAP_PADDING.bottom + 3 * 22);
   assert.equal(roomMapPadding(4).top, ROOM_MAP_PADDING.top);
-  assert.equal(roomMapPadding(1, 100).left, ROOM_MAP_PADDING.left);
-  assert.equal(roomMapPadding(1, 240).left, 120);
-  assert.equal(roomMapPadding(1, 240).right, 120);
+  assert.equal(roomMapPadding(4).left, ROOM_MAP_PADDING.left);
+  assert.equal(roomMapPadding(4).right, ROOM_MAP_PADDING.right);
 });
 
 test('P2: at the Recenter zoom, four members within 100 m share one label, and it clears the buttons', () => {
@@ -237,7 +236,7 @@ test('P2: at the Recenter zoom, four members within 100 m share one label, and i
   assert.equal(labels[0].lines, 4);
   const pill = pillSize(labels[0].text.split('\n'));
   // The fit used the 4-line padding: every point is inside it.
-  assertInside(points, cam, ROOM_MAP_SIZE, roomMapPadding(4, pill.width));
+  assertInside(points, cam, ROOM_MAP_SIZE, roomMapPadding(4));
   // The pill hangs under the lowest pin, above the 42 pt button band (Show my location, Recenter).
   const lowMember = CLUSTER.find((m) => m.coordinates === labels[0].coordinates);
   const pillTop = projectPoint(lowMember.coordinates, view, ROOM_MAP_SIZE).y + bottomOf(lowMember) + 3;
@@ -266,7 +265,7 @@ test('P2: members far apart keep their own labels at the Recenter zoom', () => {
     [['a'], ['b'], ['c']],
   );
   // With one-line labels only, the fit is the plain one-line fit.
-  assert.deepEqual(cam, cameraFor(points, ROOM_MAP_SIZE, roomMapPadding(1, pillSize(['Ann · 4.3 km/h']).width)));
+  assert.deepEqual(cam, cameraFor(points, ROOM_MAP_SIZE, roomMapPadding(1)));
 });
 
 test('P2: two pairs 3 km apart are two groups', () => {

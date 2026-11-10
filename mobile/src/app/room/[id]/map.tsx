@@ -1,13 +1,17 @@
 import { AppleMaps, type CameraMoveEvent } from 'expo-maps';
 import { SymbolView } from 'expo-symbols';
-import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 
 import { Avatar } from '@/components/avatar';
+import { HandTitle } from '@/components/hand-title';
+import { EmergencyAlerts } from '@/components/room-activity';
+import { RoomEnded } from '@/components/room-ended';
 import { RouteEditor } from '@/components/route-editor';
-import { Button, colors, Hint } from '@/components/ui';
+import { Button, colors, Hint, radius } from '@/components/ui';
 import { en } from '@/i18n/en';
+import { useRoomActivity } from '@/lib/activity';
 import { useAuth } from '@/lib/auth';
 import { errorMessage } from '@/lib/errors';
 import {
@@ -28,9 +32,11 @@ import {
   type Camera,
   fitRoomCamera,
   formatAge,
+  formatRouteKm,
   formatSpeedKmh,
   isStale,
   labelPins,
+  memberStatusLabels,
   type LatLng,
   MAX_CAMERA_ZOOM,
   parseRoute,
@@ -38,6 +44,8 @@ import {
   planLabels,
   planPins,
   ROOM_MAP_SIZE,
+  ROUTE_LINE_WIDTH,
+  stalePinId,
   type Viewport,
   viewportFromCamera,
   viewportFromRegion,
@@ -48,6 +56,7 @@ import { useMarkerIcons } from '@/lib/marker-icons';
 import { useRoomEvents } from '@/lib/room-channel';
 import { getRoom, listMembers, type Room } from '@/lib/rooms';
 import { useNow } from '@/lib/use-now';
+import { useRoomOver } from '@/lib/use-room-over';
 
 type State =
   | { status: 'loading' }
@@ -61,9 +70,13 @@ const ROUTE_COLOR = '#007AFF';
 const LABEL_BACKGROUND = '#FFFFFF';
 const LABEL_TEXT = '#000000';
 const LABEL_STALE_TEXT = '#6C6C70';
+// #1: an Emergency sender's pin and pill (fixed system red, readable on light and dark maps).
+const EMERGENCY_RED = '#FF3B30';
+const EMERGENCY_TEXT = '#FFFFFF';
 
 export default function RoomMapScreen() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  // focus: an Emergency sender to center on (Q 04.04 "Open last shared location" from chat, Photos or Info).
+  const { id, focus } = useLocalSearchParams<{ id: string; focus?: string }>();
   const [state, setState] = useState<State>({ status: 'loading' });
 
   const load = useCallback(async () => {
@@ -96,15 +109,14 @@ export default function RoomMapScreen() {
     if (event.table === 'rooms' || event.table === 'room_members') load();
   });
 
+  // G-U6-1: the room's end time passing while Map is open (the host's End arrives as a rooms notice above).
+  const ended = useRoomOver(state.status === 'ready' ? state.room : null);
+
   if (state.status === 'loading') return <ActivityIndicator style={styles.loading} />;
-  if (state.status === 'gone') {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.goneTitle}>{en.room.gone}</Text>
-        <Hint>{en.room.goneHint}</Hint>
-      </View>
-    );
-  }
+  // Q 06.04: the row is gone, so no closed-at time is known.
+  if (state.status === 'gone') return <RoomEnded />;
+  // No stale map, pins or sharing controls once the room is over.
+  if (state.status === 'ready' && ended.over) return <RoomEnded room={state.room} nowMs={ended.nowMs} />;
   if (state.status === 'error') {
     return (
       <View style={styles.center}>
@@ -113,19 +125,22 @@ export default function RoomMapScreen() {
       </View>
     );
   }
-  return <RoomMap room={state.room} names={state.names} avatars={state.avatars} />;
+  return <RoomMap room={state.room} names={state.names} avatars={state.avatars} focus={focus} />;
 }
 
 function RoomMap({
   room,
   names,
   avatars,
+  focus,
 }: {
+  focus?: string;
   room: Room;
   names: Map<string, string>;
   avatars: Map<string, string | null>;
 }) {
   const { session } = useAuth();
+  const router = useRouter();
   const userId = session?.user.id;
   const isHost = room.host_id === userId;
   const now = useNow(15_000);
@@ -135,6 +150,11 @@ function RoomMap({
   const active = allowed && room.activity_state === 'active';
 
   const my = useMyShare(room.id, userId);
+  // #1: open Emergencies show on Map too (banner above the map, red pin and pill for the sender).
+  const activity = useRoomActivity(room.id, userId, room.activity_seq);
+  const emergencyPinIds = new Set(activity.emergencies.flatMap((e) => [e.userId, stalePinId(e.userId)]));
+  // #2: each member's current status, on their pill line and in their "Sharing now" row.
+  const statusOf = memberStatusLabels(activity.memberStatus, activity.statuses);
   const [busy, setBusy] = useState<string | null>(null);
   // M2: the app-level LocationReporters does the reporting; this screen only reads its state.
   const sharingState = useSharingState(room.id);
@@ -167,6 +187,8 @@ function RoomMap({
   // Holds where the editor's map opens, captured when it opens; null when not editing.
   const [editor, setEditor] = useState<{ start: Camera | null } | null>(null);
   const shownRoute = savedRoute;
+  // #10: the route length on the map (top left, after Pen); hidden with fewer than 2 points.
+  const routeKm = useMemo(() => formatRouteKm(shownRoute), [shownRoute]);
 
   // F5-5b: the map's real size once it is laid out (the fit and the label grouping measure against it).
   const [mapSize, setMapSize] = useState<ViewSize>(ROOM_MAP_SIZE);
@@ -208,6 +230,7 @@ function RoomMap({
     label: displayName(row, userId, names),
     initialsOf: names.get(row.user_id) ?? '',
     avatarPath: avatars.get(row.user_id) ?? null,
+    status: statusOf.get(row.user_id) ?? null,
   }));
   const icons = useMarkerIcons(wantedIconPaths(pinInputs, now), session?.access_token);
   const pins = planPins(pinInputs, now, icons, en.map.stalePin);
@@ -220,6 +243,7 @@ function RoomMap({
             id: pin.id,
             coordinates: pin.coordinates,
             ...(pin.kind === 'stale' ? { systemImage: 'clock', tintColor: STALE_TINT } : { monogram: pin.monogram }),
+            ...(emergencyPinIds.has(pin.id) ? { tintColor: EMERGENCY_RED } : {}),
           },
         ],
   );
@@ -249,6 +273,7 @@ function RoomMap({
     [...savedRoute, ...presence.rows.map((r) => ({ latitude: r.lat, longitude: r.lng }))],
     labelInputs,
     mapSize,
+    shownRoute,
   );
   const camera = roomCamera(pointsCamera, myPosition);
   const [initialCamera, setInitialCamera] = useState<Camera | null>(null);
@@ -264,6 +289,24 @@ function RoomMap({
   function recenter() {
     if (camera) mapRef.current?.setCameraPosition(camera).catch(() => {});
   }
+
+  // Q 04.04: "Open last shared location" centers on the Emergency sender's last position. Opened from another
+  // screen (focus param), it centers once when that row arrives (an imperative move right after mount can be
+  // rejected, F5-4, so the camera prop is set too).
+  function focusOn(coordinates: LatLng) {
+    mapRef.current?.setCameraPosition({ coordinates, zoom: MAX_CAMERA_ZOOM }).catch(() => {});
+  }
+  const focusRow = focus ? presence.rows.find((r) => r.user_id === focus) : undefined;
+  const focused = useRef(false);
+  useEffect(() => {
+    if (focused.current || !focusRow) return;
+    focused.current = true;
+    const coordinates = { latitude: focusRow.lat, longitude: focusRow.lng };
+    // Both: the prop covers a map that is not ready yet, the call a map that already applied its first camera.
+    centeredOn.current = 'points';
+    setInitialCamera({ coordinates, zoom: MAX_CAMERA_ZOOM });
+    focusOn(coordinates);
+  }, [focusRow]);
 
   // F5-1: "Show my location" works with Share off. The permission prompt comes only from this tap;
   // the position is read once, kept on this screen, and never sent (no RPC, no sharing-store change).
@@ -333,10 +376,8 @@ function RoomMap({
       run('activity', () => setActivityState(room.id, 'active'));
       return;
     }
-    Alert.alert(en.map.endConfirmTitle, en.map.endConfirmBody, [
-      { text: en.map.cancel, style: 'cancel' },
-      { text: en.map.endActivity, style: 'destructive', onPress: () => run('activity', () => setActivityState(room.id, 'ended')) },
-    ]);
+    // Qrew unit 4 (Q 03.04): a confirm screen that states the effects, instead of an alert.
+    router.push({ pathname: '/room/[id]/end-activity', params: { id: room.id } });
   }
 
   function openEditor() {
@@ -354,18 +395,30 @@ function RoomMap({
   // given (or will be given by Recenter), so the first frame already groups.
   const givenCamera = initialCamera ?? camera;
   const labelView = viewport ?? (givenCamera ? viewportFromCamera(givenCamera, mapSize) : null);
-  const labels = planLabels(labelInputs, labelView, mapSize);
+  // G4 (#5): pills keep off the drawn route when a clear spot exists.
+  const labels = planLabels(labelInputs, labelView, mapSize, shownRoute);
+  const photoPins = pins.flatMap((pin) =>
+    pin.kind === 'photo' ? [{ id: pin.id, coordinates: pin.coordinates, icon: pin.icon }] : [],
+  );
   const annotations = [
-    ...pins.flatMap((pin) => (pin.kind === 'photo' ? [{ id: pin.id, coordinates: pin.coordinates, icon: pin.icon }] : [])),
-    ...labels.map((label) => ({
-      id: label.id,
-      coordinates: label.coordinates,
-      text: label.text,
-      anchor: label.anchor,
-      backgroundColor: LABEL_BACKGROUND,
-      textColor: label.stale ? LABEL_STALE_TEXT : LABEL_TEXT,
-    })),
+    ...photoPins,
+    ...labels.map((label) => {
+      const emergency = label.members.some((m) => emergencyPinIds.has(m));
+      return {
+        // A new id when the color changes, so the native annotation is redrawn rather than kept as it was.
+        id: emergency ? `${label.id}:emergency` : label.id,
+        coordinates: label.coordinates,
+        text: label.text,
+        anchor: label.anchor,
+        backgroundColor: emergency ? EMERGENCY_RED : LABEL_BACKGROUND,
+        textColor: emergency ? EMERGENCY_TEXT : label.stale ? LABEL_STALE_TEXT : LABEL_TEXT,
+      };
+    }),
   ];
+
+  // Own position on the map only when the permission is already granted and Share or Show my location is on.
+  // Nothing here asks for the permission (only the Share switch and Show my location do).
+  const showsMyLocation = granted === true && (my.share || showingMine);
 
   const reporterText = en.map.reporter[sharingState];
   const reporterIsError = sharingState === 'error' || sharingState === 'no-permission' || sharingState === 'refused';
@@ -376,7 +429,22 @@ function RoomMap({
       contentContainerStyle={styles.content}
       contentInsetAdjustmentBehavior="automatic"
     >
-      <Stack.Screen options={{ title: en.map.title }} />
+      <Stack.Screen options={{ title: en.map.title, headerTitle: '' }} />
+      {/* Qrew unit 4 (Q 04.02, 08.03): handwritten title and the room name; no art on the map. */}
+      <View style={styles.head}>
+        <HandTitle>{en.map.title}</HandTitle>
+        <Text style={styles.roomName} numberOfLines={2}>
+          {room.name}
+        </Text>
+      </View>
+      <EmergencyAlerts
+        roomId={room.id}
+        activity={activity}
+        userId={userId}
+        names={names}
+        presence={presence.rows}
+        onOpenLocation={(_sender, coordinates) => focusOn(coordinates)}
+      />
 
       <View
         style={styles.mapWrap}
@@ -395,10 +463,10 @@ function RoomMap({
           annotations={annotations}
           polylines={
             shownRoute.length > 1
-              ? [{ id: 'route', coordinates: shownRoute, color: ROUTE_COLOR, width: 4 }]
+              ? [{ id: 'route', coordinates: shownRoute, color: ROUTE_COLOR, width: ROUTE_LINE_WIDTH }]
               : []
           }
-          properties={{ isMyLocationEnabled: granted === true && (my.share || showingMine) }}
+          properties={{ isMyLocationEnabled: showsMyLocation }}
           onCameraMove={onCameraMove}
         />
         <Pressable
@@ -408,23 +476,35 @@ function RoomMap({
               onPress={showMyLocation}
               style={[styles.overlayButton, styles.showMine]}
             >
-              <Text style={styles.link}>{locate === 'busy' ? en.map.locating : en.map.showMine}</Text>
+              <Text style={styles.link} numberOfLines={1} maxFontSizeMultiplier={MAP_OVERLAY_MAX_SCALE}>{locate === 'busy' ? en.map.locating : en.map.showMine}</Text>
             </Pressable>
             {camera ? (
               <Pressable accessibilityRole="button" onPress={recenter} style={[styles.overlayButton, styles.recenter]}>
-                <Text style={styles.link}>{en.map.recenter}</Text>
+                <Text style={styles.link} numberOfLines={1} maxFontSizeMultiplier={MAP_OVERLAY_MAX_SCALE}>{en.map.recenter}</Text>
               </Pressable>
             ) : null}
-        {isHost ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={en.map.pen}
-            onPress={openEditor}
-            style={[styles.overlayButton, styles.pen]}
-          >
-            <SymbolView name="pencil.tip" size={18} tintColor={colors.tint} />
-            <Text style={styles.link}>{en.map.pen}</Text>
-          </Pressable>
+        {isHost || routeKm ? (
+          // Top left: Edit / Draw route (host, the plan's Pen), then the route length. A row, so the length never covers Pen.
+          <View style={styles.topLeft}>
+            {isHost ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={savedRoute.length > 0 ? en.map.editRoute : en.map.drawRoute}
+                onPress={openEditor}
+                style={[styles.chip, styles.pen]}
+              >
+                <SymbolView name="pencil.tip" size={18} tintColor={colors.tint} />
+                <Text style={styles.link} numberOfLines={1} maxFontSizeMultiplier={MAP_OVERLAY_MAX_SCALE}>
+                  {savedRoute.length > 0 ? en.map.editRoute : en.map.drawRoute}
+                </Text>
+              </Pressable>
+            ) : null}
+            {routeKm ? (
+              <View style={[styles.chip, styles.distanceChip]}>
+                <Text style={styles.distance} numberOfLines={1} maxFontSizeMultiplier={MAP_OVERLAY_MAX_SCALE}>{en.map.routeDistance(routeKm)}</Text>
+              </View>
+            ) : null}
+          </View>
         ) : null}
       </View>
       {locate === 'denied' ? <Hint tone="error">{en.map.locateDenied}</Hint> : null}
@@ -450,12 +530,21 @@ function RoomMap({
           </View>
           <Hint>{en.map.allowLocationHint}</Hint>
           {allowed ? (
-            <Button
-              title={active ? en.map.endActivity : en.map.startActivity}
-              variant={active ? 'secondary' : 'primary'}
-              busy={busy === 'activity'}
+            // Unit 4 F2 (work list B, Map host): Start / End activity is a card under the map, like Allow sharing.
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ busy: busy === 'activity', disabled: busy === 'activity' }}
+              disabled={busy === 'activity'}
               onPress={toggleActivity}
-            />
+              style={({ pressed }) => [styles.switchRow, styles.cardRow, pressed && styles.pressed]}
+            >
+              <Text style={styles.switchLabel}>{active ? en.map.endActivity : en.map.startActivity}</Text>
+              {busy === 'activity' ? (
+                <ActivityIndicator />
+              ) : (
+                <SymbolView name="chevron.right" size={14} weight="semibold" tintColor={colors.secondaryLabel} />
+              )}
+            </Pressable>
           ) : null}
         </View>
       ) : null}
@@ -500,6 +589,8 @@ function RoomMap({
               name={displayName(row, userId, names)}
               initialOf={names.get(row.user_id) ?? ''}
               avatarPath={avatars.get(row.user_id) ?? null}
+              status={statusOf.get(row.user_id) ?? null}
+              emergency={emergencyPinIds.has(row.user_id)}
               now={now}
             />
           ))}
@@ -518,9 +609,13 @@ function RoomMap({
       </View>
       {editor ? (
         <RouteEditor
+          roomName={room.name}
           savedRoute={savedRoute}
           startCamera={editor.start}
           saving={busy === 'route'}
+          showsMyLocation={showsMyLocation}
+          memberMarkers={markers}
+          memberPhotos={photoPins}
           onCancel={() => setEditor(null)}
           onSave={saveEdited}
         />
@@ -544,12 +639,16 @@ function PresenceRow({
   name,
   initialOf,
   avatarPath,
+  status,
+  emergency,
   now,
 }: {
   row: Presence;
   name: string;
   initialOf: string;
   avatarPath: string | null;
+  status: string | null;
+  emergency: boolean;
   now: number;
 }) {
   const age = formatAge(row.updated_at, now);
@@ -559,7 +658,10 @@ function PresenceRow({
     <View style={styles.presence}>
       <Avatar path={avatarPath} name={initialOf || name} size={28} />
       <View style={styles.presenceText}>
-        <Text style={styles.presenceName}>{name}</Text>
+        <Text style={styles.presenceName}>
+          {name}
+          {status ? <Text style={[styles.presenceStatus, emergency && styles.emergencyText]}>{` · ${status}`}</Text> : null}
+        </Text>
         <Text style={[styles.presenceMeta, stale && styles.staleText]}>
           {stale ? en.map.stale(age) : [speed, en.map.updated(age)].filter(Boolean).join(' · ')}
         </Text>
@@ -568,12 +670,17 @@ function PresenceRow({
   );
 }
 
+// The buttons and chips on the 360 pt map stay on one line at the largest text sizes, so "Show my location" and
+// "Recenter" never overlap (qa, largest Dynamic Type). The screen text around the map still scales fully.
+const MAP_OVERLAY_MAX_SCALE = 1.3;
 const styles = StyleSheet.create({
   screen: { backgroundColor: colors.background },
   content: { padding: 16, gap: 16 },
+  // Qrew unit 4: the QScreen head (title, gray room name under it) inside the map's own scroll view.
+  head: { gap: 4, marginBottom: -4 },
+  roomName: { fontSize: 15, color: colors.secondaryLabel },
   loading: { marginTop: 48 },
   center: { padding: 20, gap: 12, alignItems: 'center' },
-  goneTitle: { fontSize: 20, fontWeight: '600', color: colors.label },
   mapWrap: { height: 360, borderRadius: 12, borderCurve: 'continuous', overflow: 'hidden' },
   map: { flex: 1 },
   overlayButton: {
@@ -586,8 +693,22 @@ const styles = StyleSheet.create({
   },
   showMine: { left: 8 },
   // Top left: MapKit's own controls (compass, pitch toggle, user location button) stack in the top right
-  // corner, and expo-maps 58 cannot move them. The scale bar (top left) is off by default.
-  pen: { top: 8, bottom: undefined, left: 8, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  // corner, and expo-maps 58 cannot move them. The scale bar (top left) is off by default. Pen and the
+  // route length sit in one row inside the top overlay band (ROOM_MAP_PADDING.top keeps the fit clear of it).
+  topLeft: {
+    position: 'absolute',
+    top: 8,
+    left: 8,
+    right: 64,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    pointerEvents: 'box-none',
+  },
+  chip: { backgroundColor: colors.field, borderRadius: radius.pill, paddingHorizontal: 10, paddingVertical: 6 },
+  pen: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  distanceChip: { flexShrink: 1, pointerEvents: 'none' },
+  distance: { fontSize: 15, lineHeight: 22, fontWeight: '600', color: colors.label, fontVariant: ['tabular-nums'] },
   recenter: { right: 8 },
   group: { gap: 8 },
   status: { fontSize: 17, fontWeight: '600', color: colors.label },
@@ -602,6 +723,8 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   switchLabel: { fontSize: 17, color: colors.label, flexShrink: 1 },
+  cardRow: { minHeight: 52, gap: 12 },
+  pressed: { opacity: 0.6 },
   link: { fontSize: 17, color: colors.tint },
   presence: {
     backgroundColor: colors.field,
@@ -617,4 +740,6 @@ const styles = StyleSheet.create({
   presenceName: { fontSize: 17, color: colors.label },
   presenceMeta: { fontSize: 14, color: colors.secondaryLabel, fontVariant: ['tabular-nums'] },
   staleText: { color: colors.warning },
+  presenceStatus: { color: colors.secondaryLabel },
+  emergencyText: { color: EMERGENCY_RED, fontWeight: '600' },
 });

@@ -9,7 +9,9 @@ import {
   patchJob,
   removeJob,
   requeue,
+  roomIdle,
   roomSummary,
+  sharedBody,
 } from '../src/lib/upload-plan.ts';
 
 const job = (id, roomId, state, progress = 0, error) => ({ id, roomId, state, progress, error });
@@ -65,4 +67,22 @@ test('isAbortError recognises AbortError only', () => {
   assert.equal(isAbortError(Object.assign(new Error('x'), { name: 'AbortError' })), true);
   assert.equal(isAbortError(new Error('AbortError')), false);
   assert.equal(isAbortError(null), false);
+});
+
+test('roomIdle: only queued or uploading jobs of that room keep a batch open (#8)', () => {
+  const jobs = [
+    { id: 'a', roomId: 'r1', state: 'failed', progress: 0 },
+    { id: 'b', roomId: 'r2', state: 'uploading', progress: 0.5 },
+  ];
+  assert.equal(roomIdle(jobs, 'r1'), true);
+  assert.equal(roomIdle(jobs, 'r2'), false);
+  assert.equal(roomIdle([...jobs, { id: 'c', roomId: 'r1', state: 'queued', progress: 0 }], 'r1'), false);
+});
+
+test('sharedBody: counts by kind, singular and plural, none for an empty batch (#8)', () => {
+  assert.equal(sharedBody(['photo', 'photo', 'photo']), 'shared 3 photos');
+  assert.equal(sharedBody(['file']), 'shared a file');
+  assert.equal(sharedBody(['video', 'photo', 'photo']), 'shared 2 photos and a video');
+  assert.equal(sharedBody(['file', 'video', 'photo', 'file']), 'shared a photo, a video and 2 files');
+  assert.equal(sharedBody([]), null);
 });

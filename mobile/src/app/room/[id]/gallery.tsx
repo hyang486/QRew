@@ -1,41 +1,53 @@
 import { Image } from 'expo-image';
-import { Link, Stack, useLocalSearchParams } from 'expo-router';
+import { Link, Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { SymbolView } from 'expo-symbols';
-import { useCallback, useState } from 'react';
+import { type ReactNode, useCallback, useState } from 'react';
 import {
-  ActionSheetIOS,
   ActivityIndicator,
   Alert,
   FlatList,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   useWindowDimensions,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { type AddChoice, AddMediaSheet } from '@/components/add-media-sheet';
+import { HandTitle } from '@/components/hand-title';
+import { ClosesSoonCard, SavedCard } from '@/components/media-cards';
 import { PhotosOfMe } from '@/components/photos-of-me';
-import { Button, colors, Hint } from '@/components/ui';
+import { qSpacing } from '@/components/q-screen';
+import { RoomEmergencyBanner } from '@/components/room-activity';
+import { RoomEnded } from '@/components/room-ended';
+import { Button, colors, Hint, radius } from '@/components/ui';
 import { en } from '@/i18n/en';
+import { addToRoom } from '@/lib/add-media';
 import { useAuth } from '@/lib/auth';
-import { errorMessage } from '@/lib/errors';
+import { endsDay } from '@/lib/chat-plan';
+import { closesSoonMinutes } from '@/lib/expiry-plan';
 import {
   authHeaders,
   formatBytes,
-  MAX_MEDIA_BYTES,
   type Media,
   type MediaFilter,
   objectUrl,
   pickFile,
   pickPhotosAndVideos,
-  enqueueUploads,
-  type PickedItem,
-  splitBySize,
+  takePhoto,
   type UploadJob,
   useRoomMedia,
   useUploads,
 } from '@/lib/media';
+import { takeSaved } from '@/lib/media-plan';
+import { confirmOriginalsNotice } from '@/lib/originals-notice';
+import { useRoomEvents } from '@/lib/room-channel';
+import { getRoom, type Room } from '@/lib/rooms';
 import { useHeaderOverlap } from '@/lib/use-header-overlap';
+import { useNow } from '@/lib/use-now';
+import { useRoomOver } from '@/lib/use-room-over';
 
 /** 'me' = Photos of me (face matching); it lists from the 'all' media query. */
 type GalleryFilter = MediaFilter | 'me';
@@ -47,44 +59,84 @@ const FILTERS: { key: GalleryFilter; label: string }[] = [
 ];
 const COLUMNS = 3;
 const GAP = 2;
+/** F1 (U5): Dynamic Type cap for the pinned footer (Originals line and Add photos or files). */
+const FOOTER_FONT_CAP = 1.5;
 
+const timeOf = (ms: number) => new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+/**
+ * Qrew unit 5 (Q 05.01, 05.02, 05.04, 06.03): handwritten "Photos & files" with the room name, the filters as
+ * pills, upload progress under them, then the grid. "+" and the pinned "Add photos or files" open the "Add to
+ * the room" sheet. The pinned line says until when originals can be saved; in the room's last hour a card
+ * says when it closes. After "Save original" on a detail, an "Original saved" card shows once here.
+ */
 export default function GalleryScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
+  const router = useRouter();
   const { session } = useAuth();
   const userId = session?.user.id;
   const token = session?.access_token;
+  const insets = useSafeAreaInsets();
   const [filter, setFilter] = useState<GalleryFilter>('all');
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [room, setRoom] = useState<Room | null>(null);
+  // G-U6-1: the room read came back empty (RLS hides a room once it ends or expires, or after a leave).
+  const [gone, setGone] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const now = useNow(30_000);
   const { rootRef, onLayout: measureRoot, overlap: headerOverlap } = useHeaderOverlap();
   const media = useRoomMedia(id, filter === 'me' ? 'all' : filter, userId);
   const { reload } = media;
   const uploads = useUploads(id, reload);
   const { width } = useWindowDimensions();
-  const tile = Math.floor((width - GAP * (COLUMNS - 1)) / COLUMNS);
+  const tile = Math.floor((width - qSpacing.side * 2 - GAP * (COLUMNS - 1)) / COLUMNS);
 
-  const choose = useCallback(
-    async (pick: () => Promise<PickedItem[]>) => {
-      try {
-        const { ok, tooLarge } = splitBySize(await pick());
-        if (tooLarge.length > 0) {
-          const list = tooLarge.map(({ item, size }) => `${item.fileName} (${formatBytes(size)})`).join(', ');
-          Alert.alert(en.media.tooLargeTitle, en.media.tooLargeSkipped(formatBytes(MAX_MEDIA_BYTES), list));
-        }
-        if (ok.length > 0 && userId) enqueueUploads(id, userId, ok);
-      } catch (e) {
-        Alert.alert(en.media.uploadFailed, errorMessage(e));
-      }
-    },
-    [id, userId],
+  // Room name and expires_at for the head and the originals lines (Q 05.02, 06.03). A failed or empty read only
+  // hides those lines; the media list keeps its own loading and error states.
+  const readRoom = useCallback(() => {
+    getRoom(id)
+      .then((r) => {
+        setRoom(r);
+        setGone(r === null);
+      })
+      .catch(() => undefined);
+  }, [id]);
+
+  useFocusEffect(
+    useCallback(() => {
+      readRoom();
+      // Q 05.04: "Original saved" once after a save on a media detail of this room.
+      if (takeSaved(id)) setSaved(true);
+    }, [id, readRoom]),
   );
 
-  function openAddMenu() {
-    ActionSheetIOS.showActionSheetWithOptions(
-      { options: [en.media.addPhotos, en.media.addFile, en.media.cancel], cancelButtonIndex: 2 },
-      (index) => {
-        if (index === 0) choose(pickPhotosAndVideos);
-        if (index === 1) choose(pickFile);
-      },
-    );
+  // G-U6-1, as Chat: a host's End, an expiry change or a removal arrives as a rooms / room_members notice; read
+  // the room again (on the room's shared channel, so no extra subscription or polling).
+  useRoomEvents(id, (event) => {
+    if (event.table === 'rooms' || event.table === 'room_members') readRoom();
+  });
+  const ended = useRoomOver(room);
+
+  const run = useCallback(
+    async (pick: typeof takePhoto) => {
+      // Q 07.04: camera access off opens the Camera access is off screen instead of an alert.
+      if ((await addToRoom(id, userId, pick)) === 'camera-denied') {
+        router.push({ pathname: '/room/[id]/camera-off', params: { id } });
+      }
+    },
+    [id, userId, router],
+  );
+
+  // #13: Take photo first, like Messages. Both photo options show the one-time originals notice.
+  function onChoose(choice: AddChoice) {
+    if (choice === 'file') {
+      void run(pickFile);
+      return;
+    }
+    const pick = choice === 'camera' ? takePhoto : pickPhotosAndVideos;
+    void confirmOriginalsNotice().then((ok) => {
+      if (ok) void run(pick);
+    });
   }
 
   function confirmCancel(job: UploadJob) {
@@ -94,91 +146,168 @@ export default function GalleryScreen() {
     ]);
   }
 
+  // G-U6-1: no stale grid, upload rows or Add once the room is over.
+  if (gone || ended.over) {
+    return (
+      <>
+        <Stack.Screen options={{ title: '', headerTitle: '', headerRight: () => null }} />
+        <RoomEnded room={gone ? null : room} nowMs={ended.nowMs ?? now} />
+      </>
+    );
+  }
+
   const emptyText = filter === 'mine' ? en.media.emptyMine : filter === 'others' ? en.media.emptyOthers : en.media.empty;
+  const expiresMs = room ? new Date(room.expires_at).getTime() : NaN;
+  const closesIn = room ? closesSoonMinutes(room.expires_at, now) : null;
+  const originalsLine =
+    room && Number.isFinite(expiresMs) && expiresMs > now
+      ? en.media.originalsUntil(
+          endsDay(expiresMs, now),
+          new Date(expiresMs).toLocaleDateString([], { month: 'short', day: 'numeric' }),
+          timeOf(expiresMs),
+        )
+      : null;
+
+  // F1 (U5): upload rows and the Room closes / Original saved cards scroll with the content,
+  // so at the largest text sizes they cannot squeeze the grid or the pinned footer off screen.
+  const notices =
+    uploads.jobs.length > 0 || saved || (closesIn != null && room) ? (
+      <View style={styles.notices}>
+        {uploads.jobs.length > 0 ? (
+          <View style={styles.jobs}>
+            {uploads.jobs.map((job) => (
+              <UploadRow
+                key={job.id}
+                job={job}
+                onRetry={() => uploads.retry(job.id)}
+                onDismiss={() => uploads.dismiss(job.id)}
+                onCancel={() => confirmCancel(job)}
+              />
+            ))}
+          </View>
+        ) : null}
+        {saved ? <SavedCard onDismiss={() => setSaved(false)} /> : null}
+        {closesIn != null && room ? <ClosesSoonCard minutes={closesIn} time={timeOf(expiresMs)} /> : null}
+      </View>
+    ) : null;
+  const scroll = (children: ReactNode) => (
+    <ScrollView contentInsetAdjustmentBehavior="never">
+      {notices}
+      {children}
+    </ScrollView>
+  );
 
   return (
     <View ref={rootRef} onLayout={measureRoot} style={[styles.flex, { paddingTop: headerOverlap }]}>
       <Stack.Screen
         options={{
           title: en.media.title,
+          headerTitle: '',
           headerRight: () => (
-            <Pressable onPress={openAddMenu} accessibilityRole="button" accessibilityLabel={en.media.add} hitSlop={8}>
+            <Pressable onPress={() => setSheetOpen(true)} accessibilityRole="button" accessibilityLabel={en.media.add} hitSlop={8}>
               <SymbolView name="plus" size={22} tintColor={colors.tint} />
             </Pressable>
           ),
         }}
       />
-      <View style={styles.segment} accessibilityRole="tablist">
-        {FILTERS.map((f) => {
-          const selected = f.key === filter;
-          return (
-            <Pressable
-              key={f.key}
-              onPress={() => setFilter(f.key)}
-              accessibilityRole="tab"
-              accessibilityState={{ selected }}
-              style={[styles.segmentItem, selected && styles.segmentSelected]}
-            >
-              <Text style={[styles.segmentText, selected && styles.segmentTextSelected]}>{f.label}</Text>
-            </Pressable>
-          );
-        })}
+      {/* Q 05.02 head: handwritten title, gray room name, filter pills. */}
+      <View style={styles.head}>
+        <HandTitle style={styles.title}>{en.media.title}</HandTitle>
+        {room ? (
+          <Text style={styles.subtitle} numberOfLines={1}>
+            {room.name}
+          </Text>
+        ) : null}
+        <View style={styles.pills} accessibilityRole="tablist" accessibilityLabel={en.media.filters}>
+          {FILTERS.map((f) => {
+            const selected = f.key === filter;
+            return (
+              <Pressable
+                key={f.key}
+                onPress={() => setFilter(f.key)}
+                accessibilityRole="tab"
+                accessibilityState={{ selected }}
+                style={({ pressed }) => [styles.pill, selected && styles.pillSelected, pressed && !selected && { opacity: 0.5 }]}
+              >
+                <Text
+                  style={[styles.pillText, selected && styles.pillTextSelected]}
+                  numberOfLines={1}
+                  adjustsFontSizeToFit
+                  minimumFontScale={0.5}
+                  maxFontSizeMultiplier={1.6}
+                >
+                  {f.label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      </View>
+      <RoomEmergencyBanner roomId={id} style={styles.emergency} />
+
+      <View style={styles.body}>
+        {filter === 'me' && userId ? (
+          media.loading ? (
+            scroll(<ActivityIndicator style={styles.loading} />)
+          ) : (
+            <PhotosOfMe
+              roomId={id}
+              userId={userId}
+              media={media.items}
+              columns={COLUMNS}
+              gap={GAP}
+              renderTile={(item) => <Tile media={item} size={tile} token={token} />}
+              onRefreshMedia={media.reload}
+              header={notices}
+            />
+          )
+        ) : media.loading ? (
+          scroll(<ActivityIndicator style={styles.loading} />)
+        ) : media.error && media.items.length === 0 ? (
+          scroll(
+            <View style={styles.center}>
+              <Hint tone="error">{en.media.loadError}</Hint>
+              <Button title={en.home.retry} variant="secondary" onPress={media.reload} />
+            </View>,
+          )
+        ) : (
+          <FlatList
+            data={media.items}
+            keyExtractor={(m) => m.id}
+            numColumns={COLUMNS}
+            style={styles.grid}
+            columnWrapperStyle={{ gap: GAP }}
+            contentContainerStyle={{ gap: GAP }}
+            onRefresh={media.reload}
+            refreshing={false}
+            ListHeaderComponent={notices ?? undefined}
+            ListEmptyComponent={
+              <View style={styles.center}>
+                <Text style={styles.emptyTitle}>{emptyText}</Text>
+                <Hint>{en.media.emptyHint}</Hint>
+              </View>
+            }
+            renderItem={({ item }) => <Tile media={item} size={tile} token={token} />}
+          />
+        )}
       </View>
 
-      {uploads.jobs.length > 0 ? (
-        <View style={styles.jobs}>
-          {uploads.jobs.map((job) => (
-            <UploadRow
-              key={job.id}
-              job={job}
-              onRetry={() => uploads.retry(job.id)}
-              onDismiss={() => uploads.dismiss(job.id)}
-              onCancel={() => confirmCancel(job)}
-            />
-          ))}
-        </View>
-      ) : null}
-
-      {filter === 'me' && userId ? (
-        media.loading ? (
-          <ActivityIndicator style={styles.loading} />
-        ) : (
-          <PhotosOfMe
-            roomId={id}
-            userId={userId}
-            media={media.items}
-            columns={COLUMNS}
-            gap={GAP}
-            renderTile={(item) => <Tile media={item} size={tile} token={token} />}
-            onRefreshMedia={media.reload}
-          />
-        )
-      ) : media.loading ? (
-        <ActivityIndicator style={styles.loading} />
-      ) : media.error && media.items.length === 0 ? (
-        <View style={styles.center}>
-          <Hint tone="error">{en.media.loadError}</Hint>
-          <Button title={en.home.retry} variant="secondary" onPress={media.reload} />
-        </View>
-      ) : (
-        <FlatList
-          data={media.items}
-          keyExtractor={(m) => m.id}
-          numColumns={COLUMNS}
-          columnWrapperStyle={{ gap: GAP }}
-          contentContainerStyle={{ gap: GAP }}
-          contentInsetAdjustmentBehavior="automatic"
-          onRefresh={media.reload}
-          refreshing={false}
-          ListEmptyComponent={
-            <View style={styles.center}>
-              <Text style={styles.emptyTitle}>{emptyText}</Text>
-              <Hint>{en.media.emptyHint}</Hint>
-            </View>
-          }
-          renderItem={({ item }) => <Tile media={item} size={tile} token={token} />}
+      <View style={[styles.actions, { paddingBottom: Math.max(insets.bottom, 12) + 8 }]}>
+        {/* The pinned footer stays on screen at every text size: its line and button scale only so far. */}
+        {originalsLine ? (
+          <Text style={styles.originals} numberOfLines={2} maxFontSizeMultiplier={FOOTER_FONT_CAP}>
+            {originalsLine}
+          </Text>
+        ) : null}
+        <Button
+          title={en.media.addButton}
+          variant="secondary"
+          onPress={() => setSheetOpen(true)}
+          maxFontSizeMultiplier={FOOTER_FONT_CAP}
         />
-      )}
+      </View>
+
+      <AddMediaSheet visible={sheetOpen} onClose={() => setSheetOpen(false)} onChoose={onChoose} />
     </View>
   );
 }
@@ -282,27 +411,39 @@ function UploadRow({
 
 const styles = StyleSheet.create({
   flex: { flex: 1, backgroundColor: colors.background },
+  head: { paddingHorizontal: qSpacing.side, paddingTop: 4, paddingBottom: 10, gap: 4 },
+  title: { fontSize: 30, lineHeight: 38 },
+  subtitle: { fontSize: 15, color: colors.secondaryLabel },
+  pills: { flexDirection: 'row', gap: 6, marginTop: 10 },
+  pill: {
+    flex: 1,
+    minHeight: 36,
+    paddingHorizontal: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.pill,
+    borderCurve: 'continuous',
+    backgroundColor: colors.field,
+  },
+  pillSelected: { backgroundColor: colors.tint },
+  pillText: { fontSize: 14, color: colors.label },
+  pillTextSelected: { color: colors.onTint },
+  emergency: { paddingHorizontal: qSpacing.side, paddingBottom: 8 },
   loading: { marginTop: 40 },
   center: { padding: 24, gap: 12, alignItems: 'center' },
   emptyTitle: { fontSize: 17, fontWeight: '600', color: colors.label, textAlign: 'center' },
-  segment: {
-    flexDirection: 'row',
-    margin: 12,
-    padding: 2,
-    borderRadius: 9,
-    backgroundColor: colors.field,
-  },
-  segmentItem: { flex: 1, paddingVertical: 7, borderRadius: 7, alignItems: 'center' },
-  segmentSelected: { backgroundColor: colors.tint },
-  segmentText: { fontSize: 14, fontWeight: '500', color: colors.label },
-  segmentTextSelected: { color: 'white' },
-  jobs: { paddingHorizontal: 12, paddingBottom: 8, gap: 8 },
+  body: { flex: 1, paddingHorizontal: qSpacing.side },
+  grid: { borderRadius: 12, borderCurve: 'continuous' },
+  notices: { gap: 10, paddingBottom: 8 },
+  actions: { paddingHorizontal: qSpacing.side, paddingTop: 12, gap: qSpacing.gap, backgroundColor: colors.background },
+  originals: { fontSize: 13, color: colors.secondaryLabel },
+  jobs: { gap: 8 },
   job: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
     padding: 12,
-    borderRadius: 10,
+    borderRadius: 12,
     borderCurve: 'continuous',
     backgroundColor: colors.field,
   },

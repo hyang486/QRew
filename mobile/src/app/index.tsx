@@ -2,13 +2,17 @@ import { Link, Stack, useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { Button, colors, Hint, Screen } from '@/components/ui';
+import { InkArt } from '@/components/ink-art';
+import { placeTimeLine } from '@/components/place-time-cards';
+import { QLabel, QScreen } from '@/components/q-screen';
+import { Button, colors, Hint } from '@/components/ui';
 import { en } from '@/i18n/en';
 import { useAuth } from '@/lib/auth';
 import { errorMessage } from '@/lib/errors';
 import { syncExpiryReminders, takePendingReminderRoom } from '@/lib/expiry-reminders';
 import { pruneRoomCaches } from '@/lib/media';
-import { takePendingInvite } from '@/lib/pending-invite';
+import { placeTimeOf } from '@/lib/place-time';
+import { resumePendingInvite } from '@/lib/invite';
 import { formatRemaining, listMyRooms, type Room } from '@/lib/rooms';
 import { useNow } from '@/lib/use-now';
 
@@ -35,12 +39,8 @@ export default function Rooms() {
 
   useFocusEffect(
     useCallback(() => {
-      // An invite opened before sign-in resumes here once the user has a session.
-      const token = takePendingInvite();
-      if (token) {
-        router.push({ pathname: '/preview', params: { token } });
-        return;
-      }
+      // An invite chosen before sign-in (code, QR or link; item 10) opens here once, right after sign-in.
+      if (resumePendingInvite((invite) => router.push({ pathname: '/preview', params: invite }))) return;
       // An expiry reminder tapped before sign-in: open its room (access is checked there).
       const reminderRoom = takePendingReminderRoom();
       if (reminderRoom) {
@@ -62,25 +62,22 @@ export default function Rooms() {
           ),
         }}
       />
-      <Screen>
-        <Hint>
-          {en.home.signedInAs(profile?.display_name ?? '…', isGuest ? en.profile.guest : en.profile.host)}
-        </Hint>
-
-        <View style={styles.actions}>
-          <Button title={en.home.join} onPress={() => router.push('/join')} />
-          {isGuest ? (
-            <Hint>{en.home.guestCreateHint}</Hint>
-          ) : (
-            <Button title={en.home.create} variant="secondary" onPress={() => router.push('/create-room')} />
-          )}
-        </View>
+      <QScreen
+        title={en.home.title}
+        subtitle={en.home.signedInAs(profile?.display_name ?? '…', isGuest ? en.profile.guest : en.profile.host)}
+      >
+        <Button title={en.home.join} onPress={() => router.push('/join')} />
+        {isGuest ? (
+          <Hint>{en.home.guestCreateHint}</Hint>
+        ) : (
+          <Button title={en.home.create} variant="secondary" onPress={() => router.push('/create-room')} />
+        )}
 
         {error ? (
-          <View style={styles.actions}>
+          <>
             <Hint tone="error">{error}</Hint>
             <Button title={en.home.retry} variant="secondary" onPress={load} />
-          </View>
+          </>
         ) : null}
 
         {rooms === null && !error ? (
@@ -94,6 +91,7 @@ export default function Rooms() {
           </View>
         ) : null}
 
+        {rooms && rooms.length > 0 ? <QLabel>{en.home.yourRooms}</QLabel> : null}
         {rooms?.map((room) => (
           <Pressable
             key={room.id}
@@ -101,6 +99,10 @@ export default function Rooms() {
             onPress={() => router.push({ pathname: '/room/[id]', params: { id: room.id } })}
             style={({ pressed }) => [styles.row, pressed && { opacity: 0.6 }]}
           >
+            {/* Theme mark: the room's ink art, small (Q 01.03). */}
+            <View style={styles.mark}>
+              <InkArt roomName={room.name} width={40} ground={colors.field} />
+            </View>
             <View style={styles.rowText}>
               <Text style={styles.rowTitle} numberOfLines={1}>
                 {room.name}
@@ -109,18 +111,28 @@ export default function Rooms() {
                 {en.rooms.types[room.type as keyof typeof en.rooms.types] ?? room.type} ·{' '}
                 {en.home.endsIn(formatRemaining(new Date(room.expires_at).getTime() - now))}
               </Text>
+              {/* Place and time (0026), when set: one extra line; rooms without them look as before. */}
+              <PlaceTimeLine room={room} />
             </View>
-            <Text style={styles.chevron}>›</Text>
           </Pressable>
         ))}
-      </Screen>
+      </QScreen>
     </>
+  );
+}
+
+function PlaceTimeLine({ room }: { room: Room }) {
+  const placeTime = placeTimeOf(room);
+  if (!placeTime) return null;
+  return (
+    <Text style={styles.rowSubtitle} numberOfLines={1}>
+      {placeTimeLine(placeTime)}
+    </Text>
   );
 }
 
 const styles = StyleSheet.create({
   loading: { marginTop: 24 },
-  actions: { gap: 12 },
   empty: { paddingVertical: 48, alignItems: 'center', gap: 8 },
   emptyTitle: { fontSize: 20, fontWeight: '600', color: colors.label },
   headerLink: { fontSize: 17, color: colors.tint, paddingHorizontal: 8 },
@@ -130,12 +142,12 @@ const styles = StyleSheet.create({
     backgroundColor: colors.field,
     borderRadius: 12,
     borderCurve: 'continuous',
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 12,
   },
+  mark: { width: 44, alignItems: 'center' },
   rowText: { flex: 1, gap: 2 },
-  rowTitle: { fontSize: 17, fontWeight: '600', color: colors.label },
-  rowSubtitle: { fontSize: 14, color: colors.secondaryLabel, fontVariant: ['tabular-nums'] },
-  chevron: { fontSize: 22, color: colors.secondaryLabel },
+  rowTitle: { fontSize: 16, fontWeight: '500', color: colors.label },
+  rowSubtitle: { fontSize: 13, color: colors.secondaryLabel, fontVariant: ['tabular-nums'] },
 });
