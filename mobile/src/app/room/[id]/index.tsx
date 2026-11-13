@@ -1,5 +1,5 @@
 import { type Href, Link, Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useReducer, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -17,7 +17,14 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { HandTitle } from '@/components/hand-title';
 import { RoomActivityBar } from '@/components/room-activity';
 import { RoomEnded } from '@/components/room-ended';
+import { QREWING_FAB_CLEARANCE, QrewingFab } from '@/features/event/qrewing-fab';
 import { Button, colors, Hint, radius, Screen } from '@/components/ui';
+import { EntryGate, HiddenRow, ImportantBannerView, MuteBar, useQrewingChat } from '@/features/event/chat-layer';
+import { DisclosureSheet } from '@/features/event/disclosure-sheet';
+import { noteSiriRoomOpened } from '@/features/event/siri-mirror';
+import { collapseSmallTalk, type MutedRow } from '@/features/event/event-plan';
+import { useSmallTalk } from '@/features/event/use-small-talk';
+import { useRecapTriggers } from '@/features/recap/use-recap-triggers';
 import { en } from '@/i18n/en';
 import { useAuth } from '@/lib/auth';
 import { type ChatItem, MAX_MESSAGE_LENGTH, useChat } from '@/lib/chat';
@@ -31,6 +38,7 @@ import { showEndsSoon } from '@/lib/expiry-plan';
 import { getRoom, listMembers, type Room } from '@/lib/rooms';
 import { useHeaderOverlap } from '@/lib/use-header-overlap';
 import { useKeyboardOpen } from '@/lib/use-keyboard-open';
+import { memberName } from '@/lib/member-name';
 import { useNow } from '@/lib/use-now';
 
 type State =
@@ -40,7 +48,7 @@ type State =
   | { status: 'ready'; room: Room; names: Map<string, string> };
 
 export default function RoomScreen() {
-  const { id, from } = useLocalSearchParams<{ id: string; from?: string }>();
+  const { id, from, aiNote } = useLocalSearchParams<{ id: string; from?: string; aiNote?: string }>();
   const { session } = useAuth();
   const userId = session?.user.id;
   const now = useNow(15_000);
@@ -51,6 +59,12 @@ export default function RoomScreen() {
       const room = await getRoom(id);
       if (!room) {
         setState({ status: 'gone' });
+        return;
+      }
+      // Spec 7.1: in the early-end grace window the room row is readable again but the room is closed; no
+      // members list and no reminder, only the Room ended screen below.
+      if (room.deleted_at !== null) {
+        setState({ status: 'ready', room, names: new Map() });
         return;
       }
       const members = await listMembers(id);
@@ -105,7 +119,9 @@ export default function RoomScreen() {
 
   // RLS hides the room once it expires, ends or the user leaves; the clock covers the gap until a reload.
   // Q 06.04: the shared ended screen; the closed-at time only when this row shows it (expires_at passed).
-  if (state.status === 'gone' || (state.status === 'ready' && remainingMs <= 0)) {
+  // Spec 7.3: a host-ended room (deleted_at; readable only in grace) shows Room ended, whose grace state offers
+  // the recap, Photos of me and Photos & files.
+  if (state.status === 'gone' || (state.status === 'ready' && (remainingMs <= 0 || state.room.deleted_at !== null))) {
     return (
       <>
         <Stack.Screen options={{ title: '', headerTitle: '' }} />
@@ -131,6 +147,7 @@ export default function RoomScreen() {
       remainingMs={remainingMs}
       onNewSender={onNewSender}
       onSendFailed={load}
+      aiNote={aiNote === '1'}
     />
   );
 }
@@ -142,6 +159,7 @@ function ChatRoom({
   remainingMs,
   onNewSender,
   onSendFailed,
+  aiNote,
 }: {
   room: Room;
   names: Map<string, string>;
@@ -149,13 +167,55 @@ function ChatRoom({
   remainingMs: number;
   onNewSender: (senderId: string) => void;
   onSendFailed: () => void;
+  /** Qrewing AI could not be turned on at create time (non-blocking note). */
+  aiNote?: boolean;
 }) {
   const insets = useSafeAreaInsets();
   const { rootRef, onLayout: measureRoot, top, overlap: headerOverlap } = useHeaderOverlap();
   const router = useRouter();
   const chat = useChat(room.id, userId, onNewSender);
+  // Spec 10.5: the room I opened last is the one Siri asks about.
+  useEffect(() => noteSiriRoomOpened(room.id), [room.id]);
   const uploadSummary = useRoomUploadSummary(room.id);
   const [composer, dispatchComposer] = useReducer(composerReducer, initialComposer);
+  // Qrewing AI (spec 3.2): disclosure, entry gate, Mute small talk with important-message alerts.
+  const qrewing = useQrewingChat(room.id, room.type, userId);
+  useRecapTriggers(room.id, userId, qrewing.aiEnabled, remainingMs);
+  const [disclosureClosed, setDisclosureClosed] = useState(false);
+  const [askConsent, setAskConsent] = useState(false);
+  const showDisclosure = (qrewing.gates.disclosure && !disclosureClosed) || askConsent;
+  const isEvent = room.type === 'event';
+  const smallTalk = useSmallTalk({
+    roomId: room.id,
+    userId,
+    myName: userId ? names.get(userId) : undefined,
+    muted: qrewing.available && isEvent && !!qrewing.me?.aiOk && !!qrewing.me?.mute,
+    ready: !chat.loading,
+    loadError: chat.error,
+    messages: chat.messages,
+  });
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set());
+  const rows: MutedRow<ChatItem>[] = useMemo(
+    () =>
+      smallTalk.active
+        ? collapseSmallTalk(chat.messages, smallTalk.visible, expanded)
+        : chat.messages.map((item) => ({ type: 'message' as const, item })),
+    [smallTalk.active, smallTalk.visible, chat.messages, expanded],
+  );
+  const hiddenCount = rows.reduce((n, r) => n + (r.type === 'hidden' ? r.ids.length : 0), 0);
+  const listRef = useRef<FlatList<MutedRow<ChatItem>>>(null);
+  const [aiNoteShown, setAiNoteShown] = useState(!!aiNote);
+
+  function showImportant(messageId: string) {
+    let index = rows.findIndex((r) => (r.type === 'message' ? r.item.id === messageId : r.ids.includes(messageId)));
+    if (index >= 0 && rows[index].type === 'hidden') {
+      const key = (rows[index] as { key: string }).key;
+      setExpanded((cur) => new Set(cur).add(key));
+    }
+    if (index < 0) return;
+    listRef.current?.scrollToIndex({ index, viewPosition: 0.5, animated: true });
+    smallTalk.dismissBanner();
+  }
   const draft = composer.draft;
   const canSend = canSendDraft(draft);
   // Q 03.01 head (title, Ends line, tabs) and #9 ends-soon line hide while the keyboard is open, so typing
@@ -248,6 +308,28 @@ function ChatRoom({
               </View>
             </View>
           )}
+          {aiNoteShown && !keyboardOpen ? (
+            <Pressable style={styles.aiNote} onPress={() => setAiNoteShown(false)} accessibilityRole="button">
+              <Hint>{en.qrewing.create.aiSaveFailed}</Hint>
+            </Pressable>
+          ) : null}
+          {qrewing.available && isEvent && !qrewing.gates.disclosure && !qrewing.gates.entry && !keyboardOpen ? (
+            <MuteBar
+              roomId={room.id}
+              me={qrewing.me}
+              hiddenCount={hiddenCount}
+              unavailable={smallTalk.unavailable !== null}
+              onChanged={qrewing.reload}
+              onNeedConsent={() => setAskConsent(true)}
+            />
+          ) : null}
+          {smallTalk.banner ? (
+            <ImportantBannerView
+              banner={smallTalk.banner}
+              onPress={() => showImportant(smallTalk.banner!.messageId)}
+              onClose={smallTalk.dismissBanner}
+            />
+          ) : null}
           <RoomActivityBar
             roomId={room.id}
             activitySeq={room.activity_seq}
@@ -256,7 +338,11 @@ function ChatRoom({
             hideControls={keyboardOpen}
           />
 
-          {chat.loading ? (
+          {/* Spec 10.1: the list area ends at the composer, so Ask Qrewing floats over the list and never covers it. */}
+          <View style={styles.flex}>
+          {qrewing.gates.entry ? (
+            <EntryGate roomId={room.id} />
+          ) : chat.loading ? (
             <ActivityIndicator style={styles.loading} />
           ) : chat.error && chat.messages.length === 0 ? (
             <View style={styles.center}>
@@ -265,11 +351,16 @@ function ChatRoom({
             </View>
           ) : (
             <FlatList
+              ref={listRef}
               style={styles.flex}
               inverted
-              data={chat.messages}
-              keyExtractor={(m) => m.id}
-              contentContainerStyle={styles.list}
+              data={rows}
+              keyExtractor={(r) => (r.type === 'hidden' ? r.key : r.item.id)}
+              onScrollToIndexFailed={({ averageItemLength, index }) =>
+                listRef.current?.scrollToOffset({ offset: averageItemLength * index, animated: true })
+              }
+              // Inverted: paddingTop is the visual bottom, so the newest message clears Ask Qrewing.
+              contentContainerStyle={[styles.list, { paddingTop: QREWING_FAB_CLEARANCE }]}
               keyboardDismissMode="interactive"
               keyboardShouldPersistTaps="handled"
               onEndReached={chat.hasMore ? chat.loadOlder : undefined}
@@ -279,48 +370,75 @@ function ChatRoom({
                   <Hint>{en.chat.empty}</Hint>
                 </View>
               }
-              renderItem={({ item }) => (
-                <MessageRow
-                  item={item}
-                  mine={item.sender_id === userId}
-                  name={item.sender_id ? (names.get(item.sender_id) ?? en.chat.formerMember) : ''}
-                  onFailedPress={onFailedPress}
-                  onMediaPress={openPhotos}
-                />
-              )}
+              renderItem={({ item: row }) => {
+                if (row.type === 'hidden') {
+                  return (
+                    <HiddenRow
+                      count={row.ids.length}
+                      onPress={() => setExpanded((cur) => new Set(cur).add(row.key))}
+                    />
+                  );
+                }
+                const item = row.item;
+                return (
+                  <MessageRow
+                    item={item}
+                    mine={item.sender_id === userId}
+                    name={item.sender_id ? memberName(names, item.sender_id, room.host_id, en.chat) : ''}
+                    onFailedPress={onFailedPress}
+                    onMediaPress={openPhotos}
+                  />
+                );
+              }}
             />
           )}
+          <QrewingFab roomId={room.id} />
+          </View>
 
           {/* Q 03.01: one rounded field with the arrow Send inside. Q's left chat icon has no action: omitted. */}
-          <View style={[styles.composer, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-            <View style={styles.inputWrap}>
-              <TextInput
-                key={composer.key}
-                autoFocus={composerAutoFocus(composer)}
-                style={styles.input}
-                value={draft}
-                onChange={(e) => dispatchComposer({ type: 'change', key: composer.key, text: e.nativeEvent.text })}
-                placeholder={en.chat.placeholder}
-                placeholderTextColor={colors.secondaryLabel}
-                accessibilityLabel={en.chat.placeholder}
-                multiline
-                maxLength={MAX_MESSAGE_LENGTH}
-              />
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={en.chat.send}
-                accessibilityState={{ disabled: !canSend }}
-                disabled={!canSend}
-                onPress={submit}
-                hitSlop={6}
-                style={({ pressed }) => [styles.sendButton, (!canSend || pressed) && { opacity: 0.3 }]}
-              >
-                <SymbolView name="arrow.right" size={20} tintColor={colors.label} />
-              </Pressable>
+          {qrewing.gates.entry ? null : (
+            <View style={[styles.composer, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+              <View style={styles.inputWrap}>
+                <TextInput
+                  key={composer.key}
+                  autoFocus={composerAutoFocus(composer)}
+                  style={styles.input}
+                  value={draft}
+                  onChange={(e) => dispatchComposer({ type: 'change', key: composer.key, text: e.nativeEvent.text })}
+                  placeholder={en.chat.placeholder}
+                  placeholderTextColor={colors.secondaryLabel}
+                  accessibilityLabel={en.chat.placeholder}
+                  multiline
+                  maxLength={MAX_MESSAGE_LENGTH}
+                />
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={en.chat.send}
+                  accessibilityState={{ disabled: !canSend }}
+                  disabled={!canSend}
+                  onPress={submit}
+                  hitSlop={6}
+                  style={({ pressed }) => [styles.sendButton, (!canSend || pressed) && { opacity: 0.3 }]}
+                >
+                  <SymbolView name="arrow.right" size={20} tintColor={colors.label} />
+                </Pressable>
+              </View>
             </View>
-          </View>
+          )}
         </View>
       </KeyboardAvoidingView>
+      <DisclosureSheet
+        roomId={room.id}
+        visible={showDisclosure}
+        onDone={() => {
+          setAskConsent(false);
+          qrewing.reload();
+        }}
+        onClose={() => {
+          setAskConsent(false);
+          setDisclosureClosed(true);
+        }}
+      />
     </>
   );
 }
@@ -474,6 +592,7 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
   },
   bannerText: { fontSize: 14, color: colors.label },
+  aiNote: { paddingHorizontal: 24, paddingBottom: 6 },
   tabs: { flexDirection: 'row', gap: 6, marginTop: 8 },
   tab: {
     flex: 1,

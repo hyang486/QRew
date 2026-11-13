@@ -6,7 +6,11 @@ import { Avatar } from '@/components/avatar';
 import { RoomEmergencyBanner } from '@/components/room-activity';
 import { PlaceTimeCards } from '@/components/place-time-cards';
 import { RoomEnded } from '@/components/room-ended';
+import { purgeAskHistory } from '@/features/event/ask-store';
+import { noteSiriRoomClosed } from '@/features/event/siri-mirror';
+import { QrewingFab } from '@/features/event/qrewing-fab';
 import { StatusEditor } from '@/components/status-editor';
+import { QrewingInfoSection } from '@/features/event/info-section';
 import { QLink, QScreen } from '@/components/q-screen';
 import { QRowCard } from '@/components/q-row-card';
 import { Button, colors, Hint } from '@/components/ui';
@@ -132,6 +136,8 @@ export default function RoomInfoScreen() {
             await leaveRoom(room.id);
             cancelExpiryReminder(room.id);
             clearRoomCache(room.id);
+            void purgeAskHistory(room.id);
+            noteSiriRoomClosed(room.id);
             router.dismissTo('/');
           } catch (e) {
             setBusy(false);
@@ -161,6 +167,7 @@ export default function RoomInfoScreen() {
     <QScreen
       title={room.name}
       subtitle={en.room.infoSubtitle(isHost)}
+      floating={<QrewingFab roomId={room.id} />}
       actions={
         <>
           {isHost ? (
@@ -206,6 +213,7 @@ export default function RoomInfoScreen() {
       <QRowCard icon="clock" title={endsLine} subtitle={en.room.endsSoonInfo} />
       {/* Place and time (0026), only when the host set them: map, place + Open in Maps, start time. */}
       {placeTime ? <PlaceTimeCards placeTime={placeTime} /> : null}
+      <QrewingInfoSection roomId={room.id} roomType={room.type} isHost={isHost} />
 
       <View style={styles.statuses}>
         <StatusEditor roomId={room.id} isHost={isHost} editing={editingStatus} />

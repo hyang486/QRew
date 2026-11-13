@@ -22,10 +22,25 @@ type Props = {
   onRefreshMedia: () => void | Promise<void>;
   /** Room notices (upload rows, Room closes, Original saved) that scroll with the content. */
   header?: ReactNode;
+  /**
+   * Spec 7.3 grace (the host ended the room; 30 minutes of read and download): no match run, no Set up or
+   * Manage. Matched photos and their downloads stay.
+   */
+  readOnly?: boolean;
 };
 
 /** The gallery's "Me" filter: my matched photos in this room, or setup, disabled and error states. */
-export function PhotosOfMe({ roomId, userId, media, columns, gap, renderTile, onRefreshMedia, header }: Props) {
+export function PhotosOfMe({
+  roomId,
+  userId,
+  media,
+  columns,
+  gap,
+  renderTile,
+  onRefreshMedia,
+  header,
+  readOnly = false,
+}: Props) {
   const router = useRouter();
   // loadedAt: when the jobs were read; stale 'running' jobs are judged against it.
   const [data, setData] = useState<(FaceData & { loadedAt: number }) | null>(null);
@@ -60,7 +75,7 @@ export function PhotosOfMe({ roomId, userId, media, columns, gap, renderTile, on
   const runIfPending = useCallback(async (next: FaceData | null) => {
     // F7-2: pick up a run made elsewhere (the enrollment screen) while this view stayed mounted.
     setRun(lastMatchRun(roomId));
-    if (!next?.enrollment || runningRef.current) return;
+    if (readOnly || !next?.enrollment || runningRef.current) return;
     if (!shouldRunMatch(false, faceJobCounts(next.jobs, Date.now()).pending)) return;
     runningRef.current = true;
     setRunning(true);
@@ -71,7 +86,7 @@ export function PhotosOfMe({ roomId, userId, media, columns, gap, renderTile, on
       runningRef.current = false;
       setRunning(false);
     }
-  }, [load, roomId]);
+  }, [load, roomId, readOnly]);
 
   /** Loads my face data, then runs matching if jobs are pending. */
   const refresh = useCallback(async () => {
@@ -118,13 +133,13 @@ export function PhotosOfMe({ roomId, userId, media, columns, gap, renderTile, on
             <Text style={styles.introMeta}>{en.face.introMeta}</Text>
           </View>
           <InkArt art="reference" width={180} />
-          <Button title={en.face.setUp} onPress={openSetup} />
+          {readOnly ? <Hint>{en.qrewing.grace.notSetUp}</Hint> : <Button title={en.face.setUp} onPress={openSetup} />}
         </View>
       </ScrollView>
     );
   }
 
-  const manage = (
+  const manage = readOnly ? null : (
     <Pressable onPress={openSetup} accessibilityRole="button" hitSlop={8}>
       <Text style={styles.link}>{en.face.manage}</Text>
     </Pressable>

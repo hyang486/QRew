@@ -10,6 +10,9 @@ import { EmergencyAlerts } from '@/components/room-activity';
 import { RoomEnded } from '@/components/room-ended';
 import { RouteEditor } from '@/components/route-editor';
 import { Button, colors, Hint, radius } from '@/components/ui';
+import { QrewingFab } from '@/features/event/qrewing-fab';
+import { PaceCard } from '@/features/pace/pace-card';
+import { PaceLayer } from '@/features/pace/pace-layer';
 import { en } from '@/i18n/en';
 import { useRoomActivity } from '@/lib/activity';
 import { useAuth } from '@/lib/auth';
@@ -424,11 +427,13 @@ function RoomMap({
   const reporterIsError = sharingState === 'error' || sharingState === 'no-permission' || sharingState === 'refused';
 
   return (
-    <ScrollView
-      style={styles.screen}
-      contentContainerStyle={styles.content}
-      contentInsetAdjustmentBehavior="automatic"
-    >
+    // Qrewing pace maker: its cue banner and stationary sheet sit over the scroll view (PaceLayer).
+    <View style={styles.root}>
+      <ScrollView
+        style={styles.screen}
+        contentContainerStyle={styles.content}
+        contentInsetAdjustmentBehavior="automatic"
+      >
       <Stack.Screen options={{ title: en.map.title, headerTitle: '' }} />
       {/* Qrew unit 4 (Q 04.02, 08.03): handwritten title and the room name; no art on the map. */}
       <View style={styles.head}>
@@ -506,6 +511,8 @@ function RoomMap({
             ) : null}
           </View>
         ) : null}
+        {/* qa: on the map, above Recenter, so the floating Q never covers the status text below the map. */}
+        <QrewingFab roomId={room.id} bottom={36} />
       </View>
       {locate === 'denied' ? <Hint tone="error">{en.map.locateDenied}</Hint> : null}
       {locate === 'settings' ? (
@@ -578,6 +585,8 @@ function RoomMap({
         ) : null}
       </View>
 
+      <PaceCard room={room} share={my.share} />
+
       {active ? (
         <View style={styles.group}>
           <Text style={styles.status}>{en.map.members}</Text>
@@ -620,7 +629,9 @@ function RoomMap({
           onSave={saveEdited}
         />
       ) : null}
-    </ScrollView>
+      </ScrollView>
+      <PaceLayer roomId={room.id} />
+    </View>
   );
 }
 
@@ -674,7 +685,8 @@ function PresenceRow({
 // "Recenter" never overlap (qa, largest Dynamic Type). The screen text around the map still scales fully.
 const MAP_OVERLAY_MAX_SCALE = 1.3;
 const styles = StyleSheet.create({
-  screen: { backgroundColor: colors.background },
+  root: { flex: 1, backgroundColor: colors.background },
+  screen: { flex: 1, backgroundColor: colors.background },
   content: { padding: 16, gap: 16 },
   // Qrew unit 4: the QScreen head (title, gray room name under it) inside the map's own scroll view.
   head: { gap: 4, marginBottom: -4 },

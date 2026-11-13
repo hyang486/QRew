@@ -137,6 +137,44 @@ export type Database = {
           },
         ]
       }
+      entry_profiles: {
+        Row: {
+          headline: string
+          interests: string
+          links: string[]
+          looking_for: string
+          room_id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          headline: string
+          interests?: string
+          links?: string[]
+          looking_for?: string
+          room_id: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          headline?: string
+          interests?: string
+          links?: string[]
+          looking_for?: string
+          room_id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "entry_profiles_room_id_user_id_fkey"
+            columns: ["room_id", "user_id"]
+            isOneToOne: true
+            referencedRelation: "room_members"
+            referencedColumns: ["room_id", "user_id"]
+          },
+        ]
+      }
       expiry_reminders: {
         Row: {
           created_at: string
@@ -301,18 +339,24 @@ export type Database = {
         Row: {
           attempted_at: string
           id: number
+          ip_hash: string | null
+          kind: string
           succeeded: boolean
           user_id: string
         }
         Insert: {
           attempted_at?: string
           id?: never
+          ip_hash?: string | null
+          kind?: string
           succeeded: boolean
           user_id: string
         }
         Update: {
           attempted_at?: string
           id?: never
+          ip_hash?: string | null
+          kind?: string
           succeeded?: boolean
           user_id?: string
         }
@@ -361,8 +405,8 @@ export type Database = {
       }
       media: {
         Row: {
-          created_at: string
           content_sha256: string | null
+          created_at: string
           duration_ms: number | null
           file_name: string
           height: number | null
@@ -378,8 +422,8 @@ export type Database = {
           width: number | null
         }
         Insert: {
-          created_at?: string
           content_sha256?: string | null
+          created_at?: string
           duration_ms?: number | null
           file_name: string
           height?: number | null
@@ -395,8 +439,8 @@ export type Database = {
           width?: number | null
         }
         Update: {
-          created_at?: string
           content_sha256?: string | null
+          created_at?: string
           duration_ms?: number | null
           file_name?: string
           height?: number | null
@@ -453,6 +497,54 @@ export type Database = {
             columns: ["status_id"]
             isOneToOne: false
             referencedRelation: "status_definitions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      message_triage: {
+        Row: {
+          created_at: string
+          important: boolean | null
+          message_id: string
+          reason: string | null
+          room_id: string
+          source: string
+          state: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          important?: boolean | null
+          message_id: string
+          reason?: string | null
+          room_id: string
+          source?: string
+          state: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          important?: boolean | null
+          message_id?: string
+          reason?: string | null
+          room_id?: string
+          source?: string
+          state?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "message_triage_message_id_fkey"
+            columns: ["message_id"]
+            isOneToOne: true
+            referencedRelation: "messages"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "message_triage_room_id_fkey"
+            columns: ["room_id"]
+            isOneToOne: false
+            referencedRelation: "rooms"
             referencedColumns: ["id"]
           },
         ]
@@ -547,6 +639,99 @@ export type Database = {
         }
         Relationships: []
       }
+      qrewing_matches: {
+        Row: {
+          created_at: string
+          input_hash: string
+          matches: Json
+          room_id: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          input_hash: string
+          matches: Json
+          room_id: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          input_hash?: string
+          matches?: Json
+          room_id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "qrewing_matches_room_id_user_id_fkey"
+            columns: ["room_id", "user_id"]
+            isOneToOne: true
+            referencedRelation: "room_members"
+            referencedColumns: ["room_id", "user_id"]
+          },
+        ]
+      }
+      qrewing_members: {
+        Row: {
+          ai_ok_at: string | null
+          mute_small_talk: boolean
+          room_id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          ai_ok_at?: string | null
+          mute_small_talk?: boolean
+          room_id: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          ai_ok_at?: string | null
+          mute_small_talk?: boolean
+          room_id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "qrewing_members_room_id_user_id_fkey"
+            columns: ["room_id", "user_id"]
+            isOneToOne: true
+            referencedRelation: "room_members"
+            referencedColumns: ["room_id", "user_id"]
+          },
+        ]
+      }
+      qrewing_rooms: {
+        Row: {
+          ai_enabled: boolean
+          entry_required: boolean
+          room_id: string
+          updated_at: string
+        }
+        Insert: {
+          ai_enabled?: boolean
+          entry_required?: boolean
+          room_id: string
+          updated_at?: string
+        }
+        Update: {
+          ai_enabled?: boolean
+          entry_required?: boolean
+          room_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "qrewing_rooms_room_id_fkey"
+            columns: ["room_id"]
+            isOneToOne: true
+            referencedRelation: "rooms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       room_members: {
         Row: {
           joined_at: string
@@ -579,6 +764,47 @@ export type Database = {
           },
         ]
       }
+      room_recaps: {
+        Row: {
+          created_at: string
+          highlights: string[] | null
+          refreshed_at: string | null
+          room_id: string
+          state: string
+          summary: string | null
+          title: string | null
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          highlights?: string[] | null
+          refreshed_at?: string | null
+          room_id: string
+          state: string
+          summary?: string | null
+          title?: string | null
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          highlights?: string[] | null
+          refreshed_at?: string | null
+          room_id?: string
+          state?: string
+          summary?: string | null
+          title?: string | null
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "room_recaps_room_id_fkey"
+            columns: ["room_id"]
+            isOneToOne: true
+            referencedRelation: "rooms"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       rooms: {
         Row: {
           activity_ended_at: string | null
@@ -590,6 +816,7 @@ export type Database = {
           deleted_at: string | null
           expires_at: string
           expiry_version: number
+          grace_until: string | null
           host_id: string
           id: string
           invite_token: string
@@ -613,6 +840,7 @@ export type Database = {
           deleted_at?: string | null
           expires_at: string
           expiry_version?: number
+          grace_until?: string | null
           host_id: string
           id?: string
           invite_token?: string
@@ -636,6 +864,7 @@ export type Database = {
           deleted_at?: string | null
           expires_at?: string
           expiry_version?: number
+          grace_until?: string | null
           host_id?: string
           id?: string
           invite_token?: string
@@ -712,6 +941,7 @@ export type Database = {
           deleted_at: string | null
           expires_at: string
           expiry_version: number
+          grace_until: string | null
           host_id: string
           id: string
           invite_token: string
@@ -737,12 +967,31 @@ export type Database = {
         Args: { p_ref_path: string; p_room_id: string }
         Returns: string
       }
+      janitor_detect_objects: {
+        Args: { p_limit?: number }
+        Returns: {
+          created_at: string
+          name: string
+        }[]
+      }
+      janitor_secret_ok: { Args: { p_secret: string }; Returns: boolean }
       join_room: {
         Args: { p_code?: string; p_token?: string }
         Returns: string
       }
       leave_room: { Args: { p_room_id: string }; Returns: undefined }
+      log_qrewing_usage: {
+        Args: {
+          p_action: string
+          p_input_tokens: number
+          p_model: string
+          p_output_tokens: number
+          p_room_id: string
+        }
+        Returns: undefined
+      }
       mark_arrived: { Args: { p_room_id: string }; Returns: string }
+      prepare_account_deletion: { Args: { p_user_id: string }; Returns: Json }
       preview_room: {
         Args: { p_code?: string; p_token?: string }
         Returns: {
@@ -797,6 +1046,41 @@ export type Database = {
         Args: { p_room_id: string; p_status_id: string }
         Returns: string
       }
+      set_qrewing_member: {
+        Args: { p_ai_ok: boolean; p_mute: boolean; p_room_id: string }
+        Returns: {
+          ai_ok_at: string | null
+          mute_small_talk: boolean
+          room_id: string
+          updated_at: string
+          user_id: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "qrewing_members"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      set_qrewing_room: {
+        Args: {
+          p_ai_enabled: boolean
+          p_entry_required: boolean
+          p_room_id: string
+        }
+        Returns: {
+          ai_enabled: boolean
+          entry_required: boolean
+          room_id: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "qrewing_rooms"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       set_route: {
         Args: { p_room_id: string; p_route: Json }
         Returns: undefined
@@ -823,6 +1107,7 @@ export type Database = {
           deleted_at: string | null
           expires_at: string
           expiry_version: number
+          grace_until: string | null
           host_id: string
           id: string
           invite_token: string
@@ -839,6 +1124,30 @@ export type Database = {
         SetofOptions: {
           from: "*"
           to: "rooms"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      upsert_entry_profile: {
+        Args: {
+          p_headline: string
+          p_interests: string
+          p_links: string[]
+          p_looking_for: string
+          p_room_id: string
+        }
+        Returns: {
+          headline: string
+          interests: string
+          links: string[]
+          looking_for: string
+          room_id: string
+          updated_at: string
+          user_id: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "entry_profiles"
           isOneToOne: true
           isSetofReturn: false
         }

@@ -5,7 +5,7 @@ export type CleanupJob = { id: string; bucket: string; prefix: string; created_a
 export type StoredObject = { name: string; createdAt: string };
 
 export interface JanitorStore {
-  /** Deletes rooms whose expires_at has passed or that were ended (deleted_at set). Cascades and queues cleanup via triggers. Returns room ids. */
+  /** Deletes rooms that are due (isRoomDue: expired or ended, and no grace or grace over). Cascades and queues cleanup via triggers. Returns room ids. */
   deleteExpiredRooms(limit: number): Promise<string[]>;
   /** Jobs with verified_empty_at null, fewest attempts first, then oldest (J1: failing jobs cannot starve newer ones). */
   claimCleanupJobs(limit: number): Promise<CleanupJob[]>;
@@ -38,6 +38,24 @@ export const ORPHAN_AGE_MS = 60 * 60 * 1000;
 export const STUCK_ATTEMPTS = 5;
 
 const isPrefixJob = (prefix: string) => prefix.endsWith('/');
+
+export type RoomClock = { expires_at: string; deleted_at: string | null; grace_until: string | null };
+
+/** Spec 7.1: a room is due when it expired or was ended, and it has no grace period or the grace is over. */
+export function isRoomDue(r: RoomClock, now: Date): boolean {
+  const t = now.getTime();
+  const closed = new Date(r.expires_at).getTime() <= t || r.deleted_at !== null;
+  const graceOver = r.grace_until === null || new Date(r.grace_until).getTime() <= t;
+  return closed && graceOver;
+}
+
+/**
+ * The same rule as ONE PostgREST logic tree for `.or()`: or=(and(or(closed),or(graceOver))). One parameter, so it
+ * does not depend on how PostgREST combines a repeated `or` parameter (supervisor N3).
+ */
+export function dueRoomFilter(nowIso: string): string {
+  return `and(or(expires_at.lte.${nowIso},deleted_at.not.is.null),or(grace_until.is.null,grace_until.lte.${nowIso}))`;
+}
 
 /** Objects a job is allowed to delete: exact-path jobs delete that object; prefix jobs only objects that existed when queued. */
 export function deletable(job: CleanupJob, objects: StoredObject[]): StoredObject[] {

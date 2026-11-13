@@ -1,0 +1,13 @@
+diff --git a/node_modules/expo-application/expo-module.config.json b/node_modules/expo-application/expo-module.config.json
+index 24bfe04..f726f73 100644
+--- a/node_modules/expo-application/expo-module.config.json
++++ b/node_modules/expo-application/expo-module.config.json
+@@ -1,5 +1,8 @@
+ {
+   "platforms": ["apple", "android", "web"],
++  "apple": {
++    "modules": ["ApplicationModule"]
++  },
+   "android": {
+     "publication": {
+       "groupId": "host.exp.exponent",

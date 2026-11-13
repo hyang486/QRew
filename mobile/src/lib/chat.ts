@@ -2,6 +2,8 @@ import { randomUUID } from 'expo-crypto';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState } from 'react-native';
 
+import { noteMessageSent } from '@/features/recap/sent-signal';
+
 import type { Tables } from './database.types';
 import { useRoomEvents } from './room-channel';
 import { supabase } from './supabase';
@@ -142,6 +144,7 @@ export function useChat(roomId: string, userId: string | undefined, onNewSender?
       try {
         const row = await insertMessage({ id: item.id, room_id: item.room_id, sender_id: item.sender_id!, body: item.body! });
         apply((s) => ({ ...s, messages: merge(s.messages.filter((m) => m.id !== row.id), [row]) }));
+        noteMessageSent(row.room_id);
       } catch {
         apply((s) => ({
           ...s,

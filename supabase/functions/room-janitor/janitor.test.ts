@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { runJanitor, type CleanupJob, type JanitorStore, type StoredObject } from './core.ts';
+import { dueRoomFilter, isRoomDue, runJanitor, type CleanupJob, type JanitorStore, type StoredObject } from './core.ts';
 
 const NOW = new Date('2026-11-04T12:00:00Z');
 const iso = (minAgo: number) => new Date(NOW.getTime() - minAgo * 60_000).toISOString();
@@ -125,4 +125,26 @@ test('A′-2: a failing detect sweep is logged without paths and does not fail t
   const s = await runJanitor(store, { now: NOW, roomLimit: 10, jobLimit: 10, log: (e, f) => logs.push(e + JSON.stringify(f)) });
   assert.equal(s.detectRemoved, 0);
   assert.deepEqual(logs, ['detect_sweep_error{}']);
+});
+
+test('7.1 grace: due only when expired or ended AND no grace or grace over', () => {
+  const at = (min: number) => new Date(NOW.getTime() + min * 60_000).toISOString();
+  const open = { expires_at: at(60), deleted_at: null, grace_until: null };
+  assert.equal(isRoomDue(open, NOW), false, 'open room stays');
+  assert.equal(isRoomDue({ ...open, expires_at: at(0) }, NOW), true, 'expiry (no grace) is due at expires_at');
+  assert.equal(isRoomDue({ ...open, expires_at: at(-1) }, NOW), true, 'expired room is due');
+  assert.equal(isRoomDue({ ...open, deleted_at: at(-5), grace_until: at(25) }, NOW), false, 'early end in grace stays');
+  assert.equal(isRoomDue({ ...open, deleted_at: at(-30), grace_until: at(0) }, NOW), true, 'grace ending now is due');
+  assert.equal(isRoomDue({ ...open, deleted_at: at(-31), grace_until: at(-1) }, NOW), true, 'grace over is due');
+  assert.equal(isRoomDue({ ...open, deleted_at: at(-1) }, NOW), true, 'account-deletion end (no grace) is due');
+  assert.equal(isRoomDue({ ...open, expires_at: at(-1), deleted_at: at(-5), grace_until: at(25) }, NOW), false,
+    'grace still protects a room whose expires_at also passed');
+});
+
+test('7.1 grace: PostgREST filters encode the same rule', () => {
+  const nowIso = NOW.toISOString();
+  assert.equal(
+    dueRoomFilter(nowIso),
+    `and(or(expires_at.lte.${nowIso},deleted_at.not.is.null),or(grace_until.is.null,grace_until.lte.${nowIso}))`,
+  );
 });

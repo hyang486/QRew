@@ -3,7 +3,7 @@
 // face references, and (FM-Q A′-2) removes face-detection copies older than 15 minutes. Never calls AWS. Auth: header x-janitor-secret is checked against private.janitor_config via janitor_secret_ok (pg_net sends it from inside the database).
 import { createClient } from 'npm:@supabase/supabase-js@2';
 
-import { runJanitor, type CleanupJob, type JanitorStore, type StoredObject } from './core.ts';
+import { dueRoomFilter, isRoomDue, runJanitor, type CleanupJob, type JanitorStore, type StoredObject } from './core.ts';
 
 declare const Deno: { env: { get(k: string): string | undefined }; serve(h: (req: Request) => Promise<Response> | Response): void };
 
@@ -35,10 +35,13 @@ Deno.serve(async (req) => {
 
   const store: JanitorStore = {
     async deleteExpiredRooms(limit) {
-      const nowIso = new Date().toISOString();
-      const { data, error } = await admin.from('rooms').select('id').or(`expires_at.lte.${nowIso},deleted_at.not.is.null`).limit(limit);
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const { data, error } = await admin.from('rooms').select('id, expires_at, deleted_at, grace_until')
+        .or(dueRoomFilter(nowIso)).limit(limit);
       if (error) throw error;
-      const ids = (data ?? []).map((r) => r.id);
+      // Re-check in code so a filter mistake can never delete a room that is still open or in grace.
+      const ids = (data ?? []).filter((r) => isRoomDue(r, now)).map((r) => r.id);
       if (ids.length === 0) return [];
       const { error: delErr } = await admin.from('rooms').delete().in('id', ids);
       if (delErr) throw delErr;

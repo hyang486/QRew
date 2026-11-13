@@ -8,9 +8,16 @@ export function useKeyboardOpen() {
   useEffect(() => {
     const show = Keyboard.addListener('keyboardWillShow', () => setOpen(true));
     const hide = Keyboard.addListener('keyboardWillHide', () => setOpen(false));
+    // A screen mounted while the keyboard is being dismissed (router.replace after a save) misses WillHide, which
+    // fired before this effect subscribed. DidHide corrects `open` then; the re-read on the next frame covers a DidHide
+    // that also fired before the subscription (Keyboard.isVisible() follows DidShow/DidHide).
+    const didHide = Keyboard.addListener('keyboardDidHide', () => setOpen(false));
+    const frame = requestAnimationFrame(() => setOpen(Keyboard.isVisible()));
     return () => {
       show.remove();
       hide.remove();
+      didHide.remove();
+      cancelAnimationFrame(frame);
     };
   }, []);
   return open;

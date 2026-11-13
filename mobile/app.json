@@ -10,7 +10,15 @@
     "ios": {
       "icon": "./assets/images/icon.png",
       "bundleIdentifier": "com.iyaproject.moment",
-      "supportsTablet": false
+      "supportsTablet": false,
+      "infoPlist": {
+        "INAlternativeAppNames": [
+          {
+            "INAlternativeAppName": "Qrewing",
+            "INAlternativeAppNamePronunciationHint": "crew-ing"
+          }
+        ]
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -22,7 +30,7 @@
       "package": "com.iyaproject.moment"
     },
     "web": {
-      "output": "server",
+      "output": "single",
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
@@ -82,11 +90,17 @@
           "isAndroidBackgroundLocationEnabled": false
         }
       ],
-      "expo-maps"
+      "expo-maps",
+      "expo-app-intents"
     ],
     "experiments": {
       "typedRoutes": true,
-      "reactCompiler": true
+      "reactCompiler": true,
+      "inlineModules": {
+        "watchedDirectories": [
+          "app-intents"
+        ]
+      }
     }
   }
 }

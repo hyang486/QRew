@@ -20,7 +20,13 @@ export function StatusPicker({
   onPick,
   onClear,
   onClose,
+  title = en.activity.chooseStatus,
+  cancelLabel = en.room.cancel,
 }: {
+  /** Pace maker's stationary check asks its own question here; defaults to "Set your status". */
+  title?: string;
+  /** Defaults to Cancel; the stationary check says Dismiss. */
+  cancelLabel?: string;
   visible: boolean;
   statuses: StatusDefinition[];
   currentId: string | undefined;
@@ -37,7 +43,7 @@ export function StatusPicker({
           <View style={styles.handle} />
           {/* flexShrink: inside the sheet's maxHeight the grid scrolls and Cancel stays below it (never over the last row). */}
           <ScrollView style={styles.scroll} contentContainerStyle={styles.body} bounces={false}>
-            <HandTitle style={styles.title}>{en.activity.chooseStatus}</HandTitle>
+            <HandTitle style={styles.title}>{title}</HandTitle>
             <View style={styles.grid}>
               {statuses.map((s) => (
                 <Tile
@@ -54,7 +60,7 @@ export function StatusPicker({
           </ScrollView>
           <Pressable accessibilityRole="button" onPress={onClose} hitSlop={8} style={({ pressed }) => [styles.cancel, pressed && { opacity: 0.5 }]}>
             <Text style={styles.cancelText} maxFontSizeMultiplier={1.5}>
-              {en.room.cancel}
+              {cancelLabel}
             </Text>
           </Pressable>
         </View>

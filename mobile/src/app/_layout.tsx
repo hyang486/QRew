@@ -5,6 +5,7 @@ import { useFonts } from 'expo-font';
 import { useEffect } from 'react';
 
 import { HAND_FONTS } from '@/components/hand-title';
+import { startSiriMirror } from '@/features/event/siri-mirror';
 import { LocationReporters } from '@/components/location-reporters';
 import { en } from '@/i18n/en';
 import { AuthProvider, useAuth } from '@/lib/auth';
@@ -84,6 +85,8 @@ function RootNavigator() {
         <Stack.Screen name="room/[id]/face" options={{ title: en.face.title }} />
         <Stack.Screen name="room/[id]/media/[mediaId]" options={{ title: '' }} />
         <Stack.Screen name="room/[id]/invite" options={{ title: en.invite.title, presentation: 'modal' }} />
+        {/* Spec 10.4: the private Ask Qrewing chat opens as a sheet over the room. */}
+        <Stack.Screen name="room/[id]/ask" options={{ title: en.qrewing.ask.title, presentation: 'modal' }} />
       </Stack.Protected>
 
       {/* QR deep link moment://join/<token>; handles both signed-in and signed-out users. */}
@@ -104,6 +107,8 @@ function RootNavigator() {
 }
 
 export default function RootLayout() {
+  // Spec 10.5: mirrors the access token and active room into the Keychain item the Siri intent reads.
+  useEffect(() => startSiriMirror(), []);
   return (
     <AuthProvider>
       <RootNavigator />

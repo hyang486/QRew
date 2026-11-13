@@ -3,9 +3,13 @@ import { dynamicTypeSize, labelsHidden } from '@expo/ui/swift-ui/modifiers';
 import * as Location from 'expo-location';
 import { useRouter } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
 import { PlacePinMap } from '@/components/place-time-cards';
+import { defaultDraft, type QuestionPayload, validateQuestions } from '@/features/event/entry-questions';
+import { useAnnounce } from '@/features/event/announce';
+import { QuestionEditor, questionProblemText } from '@/features/event/question-editor';
+import { setEntryQuestions, setQrewingRoom } from '@/features/event/qrewing-api';
 import { QCard, QField, QLabel, QLink, QScreen } from '@/components/q-screen';
 import { Button, colors, Hint, radius } from '@/components/ui';
 import { en } from '@/i18n/en';
@@ -46,8 +50,22 @@ export default function CreateRoom() {
   const hours = pickedHours ?? defaultRoomHours(type);
   const [locationAllowed, setLocationAllowed] = useState(true);
   const [statuses, setStatuses] = useState<string>(en.createRoom.statusesDefault);
+  // Qrewing AI (spec 3.2): off by default for every type; entry info is offered for event rooms only.
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [entryRequired, setEntryRequired] = useState(false);
+  // Spec 9.4: the host's entry questions, prefilled with the default four.
+  const [questions, setQuestions] = useState(defaultDraft);
+  const [questionProblem, setQuestionProblem] = useState<ReturnType<typeof validateQuestions> | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // iOS VoiceOver ignores Hint's live region: each failure bumps the counter so a repeated identical error is read
+  // again. Question problems skip it (QuestionEditor announces those), so one Create never speaks twice.
+  const [failures, setFailures] = useState(0);
+  useAnnounce(error, failures);
+  function fail(message: string) {
+    setError(message);
+    setFailures((n) => n + 1);
+  }
   // Place and time (0026), all optional: a place name, a pin found from the name (tap the map to move it) and a
   // start time. A pin is kept only while there is a place name (create_room rule).
   const [placeName, setPlaceName] = useState('');
@@ -137,14 +155,26 @@ export default function CreateRoom() {
   async function submit() {
     const trimmed = name.trim();
     if (!trimmed) {
-      setError(en.createRoom.nameRequired);
+      fail(en.createRoom.nameRequired);
       return;
     }
     const expiresAt = new Date(Date.now() + hours * 3_600_000);
     const startProblem = startTimeError(startsAt, expiresAt.getTime(), Date.now());
     if (startProblem) {
-      setError(startProblem === 'afterClose' ? en.createRoom.startAfterClose : en.createRoom.startTooEarly);
+      fail(startProblem === 'afterClose' ? en.createRoom.startAfterClose : en.createRoom.startTooEarly);
       return;
+    }
+    const askEntry = aiEnabled && type === 'event' && entryRequired;
+    let payload: QuestionPayload[] = [];
+    if (askEntry) {
+      const checked = validateQuestions(questions);
+      if ('problem' in checked) {
+        setQuestionProblem(checked);
+        const n = questions.findIndex((q) => q.key === checked.key) + 1;
+        setError(questionProblemText(checked.problem, n || null));
+        return;
+      }
+      payload = checked.value;
     }
     setBusy(true);
     setError(null);
@@ -162,10 +192,27 @@ export default function CreateRoom() {
           .map((s) => s.trim())
           .filter(Boolean),
       });
-      router.replace({ pathname: '/room/[id]', params: { id: room.id } });
+      // A failed Qrewing save never blocks the room; the chat screen shows the note once.
+      let aiNote: string | undefined;
+      let questionsNote: string | undefined;
+      if (aiEnabled) {
+        // Spec 9.2 order: questions first, since entry_required needs at least one. If they fail, entry stays off.
+        let entry = askEntry;
+        if (entry) {
+          const saved = await setEntryQuestions(room.id, payload);
+          if ('error' in saved) {
+            entry = false;
+            questionsNote = saved.error === 'locked' ? en.qrewing.create.questionsLocked : en.qrewing.create.questionsSaveFailed;
+          }
+        }
+        const res = await setQrewingRoom(room.id, true, entry);
+        if (res.error) aiNote = '1';
+      }
+      router.replace({ pathname: '/room/[id]', params: aiNote ? { id: room.id, aiNote } : { id: room.id } });
       router.push({ pathname: '/room/[id]/invite', params: { id: room.id } });
+      if (questionsNote) Alert.alert(questionsNote);
     } catch (e) {
-      setError(errorMessage(e));
+      fail(errorMessage(e));
       setBusy(false);
     }
   }
@@ -282,6 +329,35 @@ export default function CreateRoom() {
         />
       </QCard>
       <Hint>{en.createRoom.locationHint}</Hint>
+
+      <QCard row>
+        <Text style={styles.cardTitle}>{en.qrewing.create.aiLabel}</Text>
+        <Switch value={aiEnabled} onValueChange={setAiEnabled} accessibilityLabel={en.qrewing.create.aiLabel} />
+      </QCard>
+      <Hint>{en.qrewing.create.aiHint}</Hint>
+      {aiEnabled && type === 'event' ? (
+        <>
+          <QCard row>
+            <Text style={styles.cardTitle}>{en.qrewing.create.entryLabel}</Text>
+            <Switch
+              value={entryRequired}
+              onValueChange={setEntryRequired}
+              accessibilityLabel={en.qrewing.create.entryLabel}
+            />
+          </QCard>
+          <Hint>{en.qrewing.create.entryHint}</Hint>
+          {entryRequired ? (
+            <QuestionEditor
+              value={questions}
+              onChange={(next) => {
+                setQuestions(next);
+                setQuestionProblem(null);
+              }}
+              problem={questionProblem && 'problem' in questionProblem ? questionProblem : null}
+            />
+          ) : null}
+        </>
+      ) : null}
 
       <QCard>
         <Text style={styles.cardTitle}>{en.createRoom.statusesLabel}</Text>
