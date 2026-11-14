@@ -6,6 +6,8 @@ import { useEffect } from 'react';
 
 import { HAND_FONTS } from '@/components/hand-title';
 import { startSiriMirror } from '@/features/event/siri-mirror';
+// Qrewing Calendar: loaded at start so its SIGNED_OUT listener clears the phone-only calendar on sign-out.
+import '@/features/calendar/calendar-store';
 import { LocationReporters } from '@/components/location-reporters';
 import { en } from '@/i18n/en';
 import { AuthProvider, useAuth } from '@/lib/auth';
@@ -70,6 +72,8 @@ function RootNavigator() {
         {/* Modal screens (upgrade, room/[id]/invite): keep MODAL_ROUTES in lib/root-link.ts in sync (P-3). */}
         <Stack.Screen name="upgrade" options={{ title: en.upgrade.title, headerTitle: '', presentation: 'modal' }} />
         <Stack.Screen name="plan-preview" options={{ title: en.planPreview.title }} />
+        <Stack.Screen name="calendar" options={{ title: en.calendar.title, headerTitle: '' }} />
+        <Stack.Screen name="calendar-event" options={{ title: en.calendar.newEvent, headerTitle: '' }} />
         <Stack.Screen name="create-room" options={{ title: en.createRoom.title, headerTitle: '' }} />
         <Stack.Screen name="join/index" options={{ title: en.join.title, headerTitle: '' }} />
         <Stack.Screen name="scan" options={{ title: en.scan.title, headerTitle: '' }} />

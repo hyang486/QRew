@@ -264,7 +264,9 @@ export function RoomActivityBar({
         <View style={styles.row}>
           <Chip
             label={activity.myArrivedAt ? en.activity.arrivedAt(timeOf(activity.myArrivedAt)) : en.activity.arrived}
-            filled={!activity.myArrivedAt}
+            // UI v2 bug 7 (qa, 2026-11-13): filled read as "selected" before arriving; it fills once I have arrived.
+            filled={!!activity.myArrivedAt}
+            selected={!!activity.myArrivedAt}
             busy={busy === 'arrive'}
             onPress={activity.myArrivedAt ? undefined : () => run('arrive', activity.arrive)}
           />
@@ -295,12 +297,14 @@ function Chip({
   onPress,
   busy,
   filled,
+  selected,
   danger,
 }: {
   label: string;
   onPress?: () => void;
   busy?: boolean;
   filled?: boolean;
+  selected?: boolean;
   danger?: boolean;
 }) {
   const disabled = !onPress || busy;
@@ -308,7 +312,7 @@ function Chip({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={label}
-      accessibilityState={{ disabled: !!disabled, busy: !!busy }}
+      accessibilityState={{ disabled: !!disabled, busy: !!busy, selected }}
       disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [styles.chip, filled && styles.chipFilled, (pressed || busy) && { opacity: 0.5 }]}

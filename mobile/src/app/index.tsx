@@ -1,5 +1,6 @@
 import { Link, Stack, useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useState } from 'react';
+import { SymbolView } from 'expo-symbols';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { InkArt } from '@/components/ink-art';
@@ -17,12 +18,14 @@ import { formatRemaining, listMyRooms, type Room } from '@/lib/rooms';
 import { useNow } from '@/lib/use-now';
 import { purgeStaleAskHistories } from '@/features/event/ask-store';
 import { syncSiriRooms } from '@/features/event/siri-mirror';
+import { syncCalendarRooms } from '@/features/calendar/calendar-store';
 import { roomListEntry } from '@/features/recap/grace-plan';
 import { graceTime } from '@/features/recap/use-grace';
 
 export default function Rooms() {
   const router = useRouter();
-  const { profile, isGuest } = useAuth();
+  const { profile, isGuest, session } = useAuth();
+  const uid = session?.user.id;
   const now = useNow();
   const [rooms, setRooms] = useState<Room[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -37,6 +40,8 @@ export default function Rooms() {
       // Spec 10.4: Ask Qrewing history goes once a room ended (grace counts as ended), expired or was left.
       void purgeStaleAskHistories(list.filter((r) => r.deleted_at === null).map((r) => r.id));
       syncSiriRooms(list);
+      // Qrewing Calendar: snapshot my rooms on this phone (kept after they end, for the month view and diary).
+      syncCalendarRooms(uid, list);
       // Local 24-hour reminders for every open room; cancels those of rooms no longer listed. Rooms the host
       // ended (listed only during their grace window, spec 7) get no reminder.
       syncExpiryReminders(
@@ -46,7 +51,7 @@ export default function Rooms() {
     } catch (e) {
       setError(`${en.home.loadFailed} ${errorMessage(e)}`);
     }
-  }, []);
+  }, [uid]);
 
   useFocusEffect(
     useCallback(() => {
@@ -67,9 +72,20 @@ export default function Rooms() {
       <Stack.Screen
         options={{
           headerRight: () => (
-            <Link href="/profile" style={styles.headerLink} accessibilityRole="button">
-              {en.home.profile}
-            </Link>
+            <View style={styles.headerRow}>
+              {/* Qrewing Calendar (Plus preview); the screen shows the upsell without it. */}
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={en.calendar.openLabel}
+                onPress={() => router.push('/calendar')}
+                style={styles.headerIcon}
+              >
+                <SymbolView name="calendar" size={22} tintColor={colors.tint} />
+              </Pressable>
+              <Link href="/profile" style={styles.headerLink} accessibilityRole="button">
+                {en.home.profile}
+              </Link>
+            </View>
           ),
         }}
       />
@@ -159,6 +175,8 @@ const styles = StyleSheet.create({
   loading: { marginTop: 24 },
   empty: { paddingVertical: 48, alignItems: 'center', gap: 8 },
   emptyTitle: { fontSize: 20, fontWeight: '600', color: colors.label },
+  headerRow: { flexDirection: 'row', alignItems: 'center' },
+  headerIcon: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
   headerLink: { fontSize: 17, color: colors.tint, paddingHorizontal: 8 },
   row: {
     flexDirection: 'row',

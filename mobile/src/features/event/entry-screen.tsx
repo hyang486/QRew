@@ -97,6 +97,8 @@ export function EntryScreen() {
   const base = useMemo(() => answerDraft(questions, profile.answers), [questions, profile.answers]);
   const current = useMemo(() => ({ ...base, ...edits }), [base, edits]);
   const ready = !loading && !loadFailed && questions.length > 0;
+  // UI audit (6): a room without questions shows a short explanation and no Save.
+  const empty = !loading && !loadFailed && questions.length === 0;
   const dirty = ready && answersDirty(base, current);
 
   const list: Field[] = useMemo(
@@ -170,18 +172,20 @@ export function EntryScreen() {
   return (
     <QScreen
       title={s.title}
-      subtitle={s.intro}
+      subtitle={empty ? undefined : s.intro}
       keepVisible={errorRef}
       revealRef={revealRef}
       actions={
-        <>
-          {error ? <Hint tone="error">{error}</Hint> : null}
-          {loadFailed ? (
-            <Button title={s.retry} variant="secondary" onPress={retry} />
-          ) : (
-            <Button title={s.save} onPress={save} busy={busy} disabled={!ready} />
-          )}
-        </>
+        empty ? undefined : (
+          <>
+            {error ? <Hint tone="error">{error}</Hint> : null}
+            {loadFailed ? (
+              <Button title={s.retry} variant="secondary" onPress={retry} />
+            ) : (
+              <Button title={s.save} onPress={save} busy={busy} disabled={!ready} />
+            )}
+          </>
+        )
       }
     >
       <Stack.Screen
@@ -207,8 +211,11 @@ export function EntryScreen() {
         <ActivityIndicator />
       ) : loadFailed ? (
         <Hint tone="error">{room.failed ? s.questionsLoadFailed : s.loadFailed}</Hint>
-      ) : questions.length === 0 ? (
-        <Hint>{s.noQuestions}</Hint>
+      ) : empty ? (
+        <View style={styles.empty}>
+          <Text style={styles.emptyTitle}>{s.noQuestions}</Text>
+          <Hint>{s.noQuestionsBody}</Hint>
+        </View>
       ) : (
         list.map((field, i) => {
           const { q, slot } = field;
@@ -301,6 +308,8 @@ const styles = StyleSheet.create({
   label: { fontSize: 12, color: colors.secondaryLabel, textTransform: 'uppercase', letterSpacing: 0.4, marginTop: 6 },
   star: { color: colors.danger },
   headerHit: { minWidth: 44, minHeight: 44, justifyContent: 'center' },
+  empty: { gap: 8, paddingTop: 8 },
+  emptyTitle: { fontSize: 17, fontWeight: '600', color: colors.label },
   headerSave: { fontSize: 17, fontWeight: '600', color: colors.tint, paddingHorizontal: 8 },
   headerSaveBusy: { opacity: 0.4 },
 });

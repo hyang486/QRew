@@ -57,6 +57,7 @@ export async function askQrewing(
   history: readonly AskTurn[],
   me?: AskMe | null,
   invoke: (body: Record<string, unknown>) => Promise<Invoke<unknown>> = invokeQrewing,
+  anchor?: { lat: number; lng: number },
 ): Promise<{ answer: string } | { error: AskError }> {
   let tz: string | undefined;
   try {
@@ -64,7 +65,7 @@ export async function askQrewing(
   } catch {
     tz = undefined;
   }
-  const res = await invoke(askBody(roomId, question, history, me, tz));
+  const res = await invoke(askBody(roomId, question, history, me, tz, anchor));
   if ('error' in res) return { error: askErrorKind(res.error) };
   const ok = parseAskAnswer(res.data);
   return ok ? { answer: ok.answer } : { error: 'ai_failed' };
@@ -84,16 +85,23 @@ export async function triageMessages(roomId: string, messageIds: string[]): Prom
 /** `refresh` (spec 7.2): one cheap update with newer messages; the server returns the cached row otherwise. */
 export async function requestRecap(
   roomId: string,
-  opts?: { refresh?: boolean },
+  opts?: { refresh?: boolean; diary?: boolean },
 ): Promise<RecapResult | { state: 'pending' } | { error: QrewingError }> {
   const res = await invokeQrewing<RecapResult | { state: 'pending' }>({
     action: 'recap',
     roomId,
     ...(opts?.refresh ? { refresh: true } : {}),
+    ...(opts?.diary ? { diary: true } : {}),
   });
   if ('error' in res) return res;
   if (res.data?.state === 'done' || res.data?.state === 'pending') return res.data;
   return { error: 'ai_failed' };
+}
+
+/** Qrewing Calendar: natural language → one personal event (dates only). 422 'unclear' when it can't tell. */
+export async function calendarAdd(text: string, today: string, tz: string): Promise<{ data: unknown } | { error: QrewingError }> {
+  const res = await invokeQrewing<unknown>({ action: 'calendar_add', text: text.trim().slice(0, 300), today, tz });
+  return 'error' in res ? res : { data: res.data };
 }
 
 /** 200 list (maybe cached/stale), or 202 `{ state: 'pending' }` while another call for my list runs (68132d6). */

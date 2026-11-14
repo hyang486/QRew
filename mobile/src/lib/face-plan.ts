@@ -17,6 +17,25 @@ export function photosOfMe<M extends MediaLike>(media: readonly M[], matches: re
   return media.filter((m) => m.kind === 'photo' && m.status === 'ready' && mine.has(m.id));
 }
 
+/** A stable key of the ready photo ids in the gallery list, so the Me view can notice new photos. */
+export function readyPhotoIds(media: readonly MediaLike[]): string {
+  return media
+    .filter((m) => m.kind === 'photo' && m.status === 'ready')
+    .map((m) => m.id)
+    .sort()
+    .join(',');
+}
+
+/**
+ * True when `next` holds a photo that `prev` did not: a new photo was queued for matching (server trigger), so the
+ * Me view reloads its face data and runs the match. Null `prev` = no baseline yet (the focus load covers it).
+ */
+export function hasNewReadyPhoto(prev: string | null, next: string): boolean {
+  if (prev === null || next === '') return false;
+  const before = new Set(prev === '' ? [] : prev.split(','));
+  return next.split(',').some((id) => !before.has(id));
+}
+
 /**
  * Pending = queued, or running and either still fresh or retakeable. Failed = failed, or running,
  * stale and out of attempts (the function never retakes it).

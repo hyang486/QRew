@@ -1,13 +1,22 @@
 import { useFocusEffect, useRouter } from 'expo-router';
-import { type ReactNode, useCallback, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { HandTitle } from '@/components/hand-title';
 import { InkArt } from '@/components/ink-art';
 import { Button, colors, Hint } from '@/components/ui';
+import { QREWING_FAB_CLEARANCE } from '@/features/event/qrewing-fab';
 import { en } from '@/i18n/en';
 import { clearMatchRun, type FaceData, lastMatchRun, loadFaceData, runFaceMatch } from '@/lib/face';
-import { faceJobCounts, faceViewState, type MatchRun, photosOfMe, shouldRunMatch } from '@/lib/face-plan';
+import {
+  faceJobCounts,
+  faceViewState,
+  hasNewReadyPhoto,
+  type MatchRun,
+  photosOfMe,
+  readyPhotoIds,
+  shouldRunMatch,
+} from '@/lib/face-plan';
 import { errorMessage } from '@/lib/errors';
 import { createLatestLoader } from '@/lib/latest-load';
 import type { Media } from '@/lib/media';
@@ -27,6 +36,8 @@ type Props = {
    * Manage. Matched photos and their downloads stay.
    */
   readOnly?: boolean;
+  /** Extra bottom padding for the grid and states, e.g. the Ask Qrewing button's footprint (UI audit item 1). */
+  bottomInset?: number;
 };
 
 /** The gallery's "Me" filter: my matched photos in this room, or setup, disabled and error states. */
@@ -40,6 +51,7 @@ export function PhotosOfMe({
   onRefreshMedia,
   header,
   readOnly = false,
+  bottomInset = 0,
 }: Props) {
   const router = useRouter();
   // loadedAt: when the jobs were read; stale 'running' jobs are judged against it.
@@ -48,6 +60,7 @@ export function PhotosOfMe({
   const [run, setRun] = useState<MatchRun | null>(() => lastMatchRun(roomId));
   const [running, setRunning] = useState(false);
   const runningRef = useRef(false);
+  const rerunRef = useRef(false);
   const [refreshing, setRefreshing] = useState(false);
   // FG-L1: focus, pull and post-run loads can overlap; only the newest one is applied.
   const [runLatest] = useState(createLatestLoader);
@@ -71,17 +84,33 @@ export function PhotosOfMe({
     return applied as FaceData | null;
   }, [roomId, userId, runLatest]);
 
-  /** Only while jobs are pending (FG-2), asks the service once to process them, then reloads. */
+  /**
+   * Only while jobs are pending (FG-2), asks the service to process them, then reloads. A request that arrives
+   * during a run (pull, new photo) cannot join it, so it marks `rerunRef` and the run goes once more if jobs that
+   * were queued meanwhile are still pending.
+   */
   const runIfPending = useCallback(async (next: FaceData | null) => {
     // F7-2: pick up a run made elsewhere (the enrollment screen) while this view stayed mounted.
     setRun(lastMatchRun(roomId));
-    if (readOnly || !next?.enrollment || runningRef.current) return;
+    if (readOnly || !next?.enrollment) return;
+    if (runningRef.current) {
+      rerunRef.current = true;
+      return;
+    }
     if (!shouldRunMatch(false, faceJobCounts(next.jobs, Date.now()).pending)) return;
     runningRef.current = true;
     setRunning(true);
     try {
-      setRun(await runFaceMatch(roomId));
-      await load();
+      let after: FaceData | null;
+      do {
+        rerunRef.current = false;
+        setRun(await runFaceMatch(roomId));
+        after = await load();
+      } while (
+        rerunRef.current &&
+        after?.enrollment &&
+        shouldRunMatch(false, faceJobCounts(after.jobs, Date.now()).pending)
+      );
     } finally {
       runningRef.current = false;
       setRunning(false);
@@ -99,9 +128,19 @@ export function PhotosOfMe({
     }, [refresh]),
   );
 
+  // A new ready photo (my upload, or another member's via the media realtime path) was queued for my enrollment by
+  // the server trigger; reload and match while the view stays open instead of waiting for the next focus.
+  const photoIds = readyPhotoIds(media);
+  const seenPhotoIds = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = seenPhotoIds.current;
+    seenPhotoIds.current = photoIds;
+    if (hasNewReadyPhoto(prev, photoIds)) refresh();
+  }, [photoIds, refresh]);
+
   /** Non-grid states scroll too, so the notices above them never squeeze them off screen. */
   const scroll = (children: ReactNode) => (
-    <ScrollView contentInsetAdjustmentBehavior="never">
+    <ScrollView contentInsetAdjustmentBehavior="never" contentContainerStyle={{ paddingBottom: bottomInset }}>
       {header}
       {children}
     </ScrollView>
@@ -124,18 +163,24 @@ export function PhotosOfMe({
   // Q 06.01: handwritten title, two short lines, art, and the black setup button.
   if (view === 'consent') {
     return (
-      <ScrollView contentContainerStyle={styles.introScroll} contentInsetAdjustmentBehavior="never">
-        {header}
-        <View style={styles.intro}>
-          <View style={styles.introHead}>
-            <HandTitle style={styles.centerText}>{en.face.title}</HandTitle>
-            <Text style={styles.introLine}>{en.face.intro}</Text>
-            <Text style={styles.introMeta}>{en.face.introMeta}</Text>
+      // UI audit (2): the setup button is pinned under the scroll area, left of the Ask Qrewing button, so the
+      // art can never push it under the gallery footer.
+      <View style={styles.introWrap}>
+        <ScrollView style={styles.introWrap} contentContainerStyle={styles.introScroll} contentInsetAdjustmentBehavior="never">
+          {header}
+          <View style={styles.intro}>
+            <View style={styles.introHead}>
+              <HandTitle style={styles.centerText}>{en.face.title}</HandTitle>
+              <Text style={styles.introLine}>{en.face.intro}</Text>
+              <Text style={styles.introMeta}>{en.face.introMeta}</Text>
+            </View>
+            <InkArt art="reference" width={180} />
           </View>
-          <InkArt art="reference" width={180} />
+        </ScrollView>
+        <View style={[styles.introAction, !readOnly && { paddingRight: QREWING_FAB_CLEARANCE }]}>
           {readOnly ? <Hint>{en.qrewing.grace.notSetUp}</Hint> : <Button title={en.face.setUp} onPress={openSetup} />}
         </View>
-      </ScrollView>
+      </View>
     );
   }
 
@@ -180,7 +225,7 @@ export function PhotosOfMe({
       keyExtractor={(m) => m.id}
       numColumns={columns}
       columnWrapperStyle={{ gap }}
-      contentContainerStyle={{ gap }}
+      contentContainerStyle={{ gap, paddingBottom: bottomInset }}
       contentInsetAdjustmentBehavior="automatic"
       onRefresh={async () => {
         // The spinner covers the media and face reloads; a match run it starts shows as "Checking".
@@ -227,7 +272,9 @@ export function PhotosOfMe({
 const styles = StyleSheet.create({
   loading: { marginTop: 40 },
   center: { padding: 24, gap: 12, alignItems: 'center' },
+  introWrap: { flex: 1 },
   introScroll: { flexGrow: 1 },
+  introAction: { paddingTop: 12, paddingBottom: 15, justifyContent: 'center' },
   intro: { flexGrow: 1, paddingHorizontal: 24, paddingVertical: 28, gap: 28, justifyContent: 'space-between' },
   introHead: { alignItems: 'center', gap: 6 },
   centerText: { textAlign: 'center' },

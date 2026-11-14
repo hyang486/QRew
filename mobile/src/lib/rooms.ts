@@ -101,15 +101,12 @@ export async function getRoom(roomId: string): Promise<Room | null> {
 }
 
 /**
- * Who marked Arrived in the room's current activity (Room info, Q 03.03). A plain read under the existing
- * arrivals_select policy (room members only); rows are per activity_seq, as mark_arrived writes them.
+ * Who marked Arrived in the room, in any activity (Room info, Q 03.03; E2E c: a restarted activity does not reset
+ * arrivals). A plain read under the existing arrivals_select policy (room members only). mark_arrived writes one
+ * row per activity_seq, so a user can appear more than once; arrivedMemberCount counts each person once.
  */
-export async function listArrivedIds(roomId: string, activitySeq: number): Promise<string[]> {
-  const { data, error } = await supabase
-    .from('arrivals')
-    .select('user_id')
-    .eq('room_id', roomId)
-    .eq('activity_seq', activitySeq);
+export async function listArrivedIds(roomId: string): Promise<string[]> {
+  const { data, error } = await supabase.from('arrivals').select('user_id').eq('room_id', roomId);
   if (error) throw error;
   return data.map((r) => r.user_id);
 }

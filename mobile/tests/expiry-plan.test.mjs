@@ -86,11 +86,18 @@ test('a 3 h room shows the banner only in the last hour', () => {
   assert.equal(showEndsSoon(iso(created), iso(expires), expires - 1000), true);
 });
 
-test('a 1 day room keeps the 24 h window, even when created_at is a little later than the client time', () => {
+test('UI v2 bug 1: a 1 day room shows the banner only in its last hour, not right after creation', () => {
   const expires = NOW + 24 * HOUR;
-  assert.equal(endsSoonWindowMs(iso(NOW), iso(expires)), REMINDER_WINDOW_MS);
-  assert.equal(endsSoonWindowMs(iso(NOW + 3000), iso(expires)), REMINDER_WINDOW_MS);
-  assert.equal(showEndsSoon(iso(NOW + 3000), iso(expires), NOW + 5000), true);
+  assert.equal(endsSoonWindowMs(iso(NOW), iso(expires)), SHORT_ROOM_BANNER_MS);
+  assert.equal(endsSoonWindowMs(iso(NOW + 3000), iso(expires)), SHORT_ROOM_BANNER_MS);
+  // Client clock a few minutes behind the server: still a 1-day room.
+  assert.equal(endsSoonWindowMs(iso(NOW - 5 * 60 * 1000), iso(expires)), SHORT_ROOM_BANNER_MS);
+  assert.equal(showEndsSoon(iso(NOW + 3000), iso(expires), NOW + 5000), false);
+  assert.equal(showEndsSoon(iso(NOW + 3000), iso(expires), expires - HOUR + 1000), true);
+});
+
+test('a 2 day room keeps the 24 h window', () => {
+  assert.equal(endsSoonWindowMs(iso(NOW), iso(NOW + 48 * HOUR)), REMINDER_WINDOW_MS);
 });
 
 test('longer rooms show the banner in the last 24 h only', () => {
@@ -115,12 +122,12 @@ test('G6b: a 3 h room is reminded 1 h before its end, not 24 h before', () => {
   assert.equal(plan.schedule[0].fireAt, NOW + 2 * HOUR);
 });
 
-test('G6b: a 1-day room created with clock lag (23 h 55 min long) keeps the 24 h reminder', () => {
-  // Created 10 min before NOW, 23 h 45 min left: 23 h 55 min long, inside the 10 min margin, so a 24 h room.
+test('UI v2 bug 1: a 1-day room (23 h 55 min long from clock lag) is reminded in its last hour', () => {
+  // Created 10 min before NOW, 23 h 45 min left: reminded 1 h before the end, never at creation.
   const lag = room('lag', 23 * HOUR + 45 * 60 * 1000, 1, 10 * 60 * 1000);
-  // Its 24 h reminder time (NOW - 15 min) has passed: nothing is scheduled. Were it treated as short, the
-  // reminder would be scheduled at NOW + 22 h 45 min.
-  assert.deepEqual(planReminders([lag], [], NOW, true).schedule, []);
+  assert.equal(planReminders([lag], [], NOW, true).schedule[0].fireAt, NOW + 22 * HOUR + 45 * 60 * 1000);
+  const day = room('day', 24 * HOUR, 1, 0);
+  assert.equal(planReminders([day], [], NOW, true).schedule[0].fireAt, NOW + 23 * HOUR);
   // Two days long: the reminder is 24 h before the end.
   const long = room('long', 2 * 24 * HOUR, 1, 0);
   assert.equal(planReminders([long], [], NOW, true).schedule[0].fireAt, NOW + 24 * HOUR);

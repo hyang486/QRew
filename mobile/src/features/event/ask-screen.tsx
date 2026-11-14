@@ -7,12 +7,13 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-nati
 import { useAnnounce } from '@/features/event/announce';
 import { QField, QScreen, type QScreenReveal } from '@/components/q-screen';
 import { Button, colors, Hint } from '@/components/ui';
-import { paceSnapshot } from '@/features/pace/engine';
+import { paceSnapshot, paceStartPoint } from '@/features/pace/engine';
 import { en } from '@/i18n/en';
+import { myFirstSharedPoint } from '@/lib/location';
 import { supabase } from '@/lib/supabase';
 
 import { ASK_FAKE, fakeAskInvoke } from './ask-fake';
-import { type AskError, ASK_LIMITS, askQuestion, type AskTurn } from './ask-plan';
+import { type AskError, ASK_LIMITS, askAnchor, askQuestion, type AskTurn } from './ask-plan';
 import { appendAskTurn, loadAskHistory, purgeAskHistory } from './ask-store';
 import { DisclosureSheet } from './disclosure-sheet';
 import { askQrewing } from './qrewing-api';
@@ -58,7 +59,8 @@ export function AskScreen() {
     setSending(q);
     setDraft('');
     setError(null);
-    const res = await askQrewing(id, q, turns, await mySnapshot(id), ASK_FAKE ? fakeAskInvoke : undefined);
+    const mine = await myAskContext(id);
+    const res = await askQrewing(id, q, turns, mine.me, ASK_FAKE ? fakeAskInvoke : undefined, mine.anchor);
     if ('error' in res) {
       if (res.error === 'not_member') {
         // Spec 10.4: no longer in the room, so its history goes and the modal closes.
@@ -158,13 +160,22 @@ export function AskScreen() {
   );
 }
 
-/** My own activity in this room for `me` (spec 10.3), or null when none runs or the room read fails. */
-async function mySnapshot(roomId: string) {
+/**
+ * My own activity in this room for `me` (spec 10.3), and the progress `anchor` (bug b: the place pin, else my own
+ * start point, else s11: my first point shared in this room); nothing when the room read fails.
+ */
+async function myAskContext(roomId: string) {
   try {
-    const { data } = await supabase.from('rooms').select('id, activity_state, activity_seq').eq('id', roomId).maybeSingle();
-    return data ? paceSnapshot(data) : null;
+    const { data } = await supabase
+      .from('rooms')
+      .select('id, activity_state, activity_seq, place_lat, place_lng')
+      .eq('id', roomId)
+      .maybeSingle();
+    if (!data) return { me: null, anchor: undefined };
+    const place = data.place_lat != null && data.place_lng != null ? { latitude: data.place_lat, longitude: data.place_lng } : null;
+    return { me: paceSnapshot(data), anchor: askAnchor(place, paceStartPoint(data), myFirstSharedPoint(roomId)) };
   } catch {
-    return null;
+    return { me: null, anchor: undefined };
   }
 }
 

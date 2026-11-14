@@ -28,6 +28,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { HandTitle } from '@/components/hand-title';
 import { colors } from '@/components/ui';
+import { QREWING_FAB_CLEARANCE } from '@/features/event/qrewing-fab-size';
 import { keyboardOverlap, revealScrollY, type Span } from '@/lib/keyboard-plan';
 import { useHeaderOverlap } from '@/lib/use-header-overlap';
 
@@ -57,6 +58,7 @@ export function QScreen({
   keepVisible,
   revealRef,
   floating,
+  background,
 }: {
   title?: string;
   /** Small gray line right under the title. */
@@ -85,6 +87,8 @@ export function QScreen({
    * pinned actions, so it never covers them. Screens that do not pass it keep the old tree.
    */
   floating?: ReactNode;
+  /** Opt-in (Qrewing Calendar paper): the screen and pinned-actions ground; default is the app background. */
+  background?: string;
 }) {
   const insets = useSafeAreaInsets();
   // Pad the top by the header overlap ourselves instead of contentInsetAdjustmentBehavior "automatic": that
@@ -130,7 +134,7 @@ export function QScreen({
         </ScrollView>
   );
   return (
-    <View style={[styles.root, { paddingBottom: keyboardPad }]}>
+    <View style={[styles.root, { paddingBottom: keyboardPad }, background ? { backgroundColor: background } : null]}>
       <View ref={rootRef} onLayout={onLayout} style={styles.flex}>
         {floating ? (
           <View style={styles.flex}>
@@ -140,7 +144,7 @@ export function QScreen({
         ) : (
           body
         )}
-        {actions ? <View style={[styles.actions, { paddingBottom: Math.max(insets.bottom, 12) + 8 }]}>{actions}</View> : null}
+        {actions ? <View style={[styles.actions, { paddingBottom: Math.max(insets.bottom, 12) + 8 }, background ? { backgroundColor: background } : null]}>{actions}</View> : null}
       </View>
     </View>
   );
@@ -328,8 +332,8 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.background },
   flex: { flex: 1 },
   body: { flexGrow: 1, paddingHorizontal: qSpacing.side, paddingBottom: 24, gap: qSpacing.gap },
-  // Room for a `floating` button (56) plus its margins, so the last row scrolls clear of it.
-  floatingClear: { paddingBottom: 80 },
+  // Room for a `floating` button (the Ask Qrewing footprint), so the last row scrolls clear of it.
+  floatingClear: { paddingBottom: QREWING_FAB_CLEARANCE },
   head: { marginBottom: 6, gap: 4 },
   subtitle: { fontSize: 15, color: colors.secondaryLabel },
   spacer: { flexGrow: 1 },

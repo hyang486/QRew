@@ -8,6 +8,7 @@ import { Alert, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'rea
 import { PlacePinMap } from '@/components/place-time-cards';
 import { defaultDraft, type QuestionPayload, validateQuestions } from '@/features/event/entry-questions';
 import { useAnnounce } from '@/features/event/announce';
+import { createBarLayout } from '@/features/event/create-bar';
 import { QuestionEditor, questionProblemText } from '@/features/event/question-editor';
 import { setEntryQuestions, setQrewingRoom } from '@/features/event/qrewing-api';
 import { QCard, QField, QLabel, QLink, QScreen } from '@/components/q-screen';
@@ -220,15 +221,17 @@ export default function CreateRoom() {
   // Qrew Q 02.02 (human placement B): name, Room type chips, Room closes after chips (4 and 7 days as extra
   // chips, no Custom), the deletion line, the Plus preview link under it, the location card with its switch
   // and hint, the Status options card (editable), Create room pinned at the bottom. Place and time unit (0026):
-  // the optional meeting place and time card sits under the Plus link, before the location card.
+  // the optional meeting place and time card sits under the Plus link. UI audit 2026-11-13 item 8 (qa, human "fix
+  // all"): the location and Qrewing AI switches with their hints moved up, right under Room type.
   return (
     <QScreen
       title={en.createRoom.title}
       actions={
-        <>
+        // E2E (i): hairline at the scroll edge and a non-tappable gap, so a tap on a clipped switch never hits Create.
+        <View style={styles.bar}>
           {error ? <Hint tone="error">{error}</Hint> : null}
           <Button title={en.createRoom.submit} onPress={submit} busy={busy} />
-        </>
+        </View>
       }
     >
       <QField
@@ -246,6 +249,47 @@ export default function CreateRoom() {
           <Choice key={t} label={en.rooms.types[t]} selected={type === t} onPress={() => pickType(t)} />
         ))}
       </View>
+
+      {/* UI audit item 8: the location and AI switches (with their helper lines) sit right under Room type, so
+          both helpers show without scrolling on a 402x874 pt phone at the default text size. */}
+      <QCard row>
+        <Text style={styles.cardTitle}>{en.createRoom.locationLabel}</Text>
+        <Switch
+          value={locationAllowed}
+          onValueChange={setLocationAllowed}
+          accessibilityLabel={en.createRoom.locationLabel}
+        />
+      </QCard>
+      <Hint>{en.createRoom.locationHint}</Hint>
+
+      <QCard row>
+        <Text style={styles.cardTitle}>{en.qrewing.create.aiLabel}</Text>
+        <Switch value={aiEnabled} onValueChange={setAiEnabled} accessibilityLabel={en.qrewing.create.aiLabel} />
+      </QCard>
+      <Hint>{en.qrewing.create.aiHint}</Hint>
+      {aiEnabled && type === 'event' ? (
+        <>
+          <QCard row>
+            <Text style={styles.cardTitle}>{en.qrewing.create.entryLabel}</Text>
+            <Switch
+              value={entryRequired}
+              onValueChange={setEntryRequired}
+              accessibilityLabel={en.qrewing.create.entryLabel}
+            />
+          </QCard>
+          <Hint>{en.qrewing.create.entryHint}</Hint>
+          {entryRequired ? (
+            <QuestionEditor
+              value={questions}
+              onChange={(next) => {
+                setQuestions(next);
+                setQuestionProblem(null);
+              }}
+              problem={questionProblem && 'problem' in questionProblem ? questionProblem : null}
+            />
+          ) : null}
+        </>
+      ) : null}
 
       <QLabel>{en.createRoom.expiryLabel}</QLabel>
       <View style={styles.chips} accessibilityRole="radiogroup" accessibilityLabel={en.createRoom.expiryLabel}>
@@ -320,45 +364,6 @@ export default function CreateRoom() {
         <QLink title={en.createRoom.addStartTime} onPress={addStartTime} />
       )}
 
-      <QCard row>
-        <Text style={styles.cardTitle}>{en.createRoom.locationLabel}</Text>
-        <Switch
-          value={locationAllowed}
-          onValueChange={setLocationAllowed}
-          accessibilityLabel={en.createRoom.locationLabel}
-        />
-      </QCard>
-      <Hint>{en.createRoom.locationHint}</Hint>
-
-      <QCard row>
-        <Text style={styles.cardTitle}>{en.qrewing.create.aiLabel}</Text>
-        <Switch value={aiEnabled} onValueChange={setAiEnabled} accessibilityLabel={en.qrewing.create.aiLabel} />
-      </QCard>
-      <Hint>{en.qrewing.create.aiHint}</Hint>
-      {aiEnabled && type === 'event' ? (
-        <>
-          <QCard row>
-            <Text style={styles.cardTitle}>{en.qrewing.create.entryLabel}</Text>
-            <Switch
-              value={entryRequired}
-              onValueChange={setEntryRequired}
-              accessibilityLabel={en.qrewing.create.entryLabel}
-            />
-          </QCard>
-          <Hint>{en.qrewing.create.entryHint}</Hint>
-          {entryRequired ? (
-            <QuestionEditor
-              value={questions}
-              onChange={(next) => {
-                setQuestions(next);
-                setQuestionProblem(null);
-              }}
-              problem={questionProblem && 'problem' in questionProblem ? questionProblem : null}
-            />
-          ) : null}
-        </>
-      ) : null}
-
       <QCard>
         <Text style={styles.cardTitle}>{en.createRoom.statusesLabel}</Text>
         <TextInput
@@ -378,6 +383,7 @@ export default function CreateRoom() {
 }
 
 const styles = StyleSheet.create({
+  bar: { ...createBarLayout, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.separator },
   planLink: { fontSize: 15, color: colors.tint, textDecorationLine: 'underline' },
   deletes: { fontSize: 14, color: colors.label, fontVariant: ['tabular-nums'] },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },

@@ -48,6 +48,16 @@ test('a stop adds no time: stopped while standing, moving time unchanged', () =>
   assert.equal(snap(t, 700).activity, 'moving');
 });
 
+test('E2E (b): moving at every second of a steady run with 1 Hz fixes (most land in the noise circle)', () => {
+  let t = newTracker('r', 0);
+  const wrong = [];
+  for (let s = 0; s <= 600; s++) {
+    t = addFix(t, fix(s, s * 3));
+    if (s >= 60 && snap(t, s).activity !== 'moving') wrong.push(s);
+  }
+  assert.deepEqual(wrong, []);
+});
+
 test('stopped once the last move is stale (no new fix)', () => {
   const t = walk(newTracker('r', 0), 0, 300, 4);
   assert.equal(snap(t, 300 + SNAPSHOT_MOVING_FRESH_MS / 1000).activity, 'moving');

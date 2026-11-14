@@ -48,7 +48,9 @@ async function fetchActivity(roomId: string, userId: string, activitySeq: number
       .select('arrived_at')
       .eq('room_id', roomId)
       .eq('user_id', userId)
-      .eq('activity_seq', activitySeq)
+      // E2E (c): Arrived means arrived at the meetup, so my first arrival in any activity keeps the chip set.
+      .order('arrived_at', { ascending: true })
+      .limit(1)
       .maybeSingle(),
     supabase
       .from('emergency_events')

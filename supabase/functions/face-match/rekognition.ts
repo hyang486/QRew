@@ -1,4 +1,4 @@
-import { FaceProviderError, MAX_IMAGE_BYTES, type CompareResult, type FaceProvider } from './provider.ts';
+import { FaceProviderError, MAX_IMAGE_BYTES, type CompareResult, type FaceBoxSize, type FaceProvider } from './provider.ts';
 import { signV4 } from './sigv4.ts';
 
 export type RekognitionConfig = {
@@ -15,6 +15,15 @@ export type RekognitionConfig = {
 };
 
 export const REKOGNITION_TIMEOUT_MS = 20_000;
+export const QUALITY_FILTER = 'AUTO';
+
+type AwsBox = { Width?: number; Height?: number };
+/** Box size only (fraction of the image, 3 decimals); Left/Top and every other face field are dropped. */
+function boxSize(face: { BoundingBox?: AwsBox } | undefined): FaceBoxSize | null {
+  const b = face?.BoundingBox;
+  if (typeof b?.Width !== 'number' || typeof b?.Height !== 'number') return null;
+  return { w: Math.round(b.Width * 1000) / 1000, h: Math.round(b.Height * 1000) / 1000 };
+}
 
 function toBase64(bytes: Uint8Array): string {
   let s = '';
@@ -49,7 +58,7 @@ export function createRekognitionProvider(cfg: RekognitionConfig): FaceProvider 
         SourceImage: { Bytes: toBase64(reference) },
         TargetImage: { Bytes: toBase64(target) },
         SimilarityThreshold: cfg.similarityThreshold,
-        QualityFilter: 'AUTO',
+        QualityFilter: QUALITY_FILTER,
       });
       const signed = await signV4({
         method: 'POST',
@@ -69,7 +78,13 @@ export function createRekognitionProvider(cfg: RekognitionConfig): FaceProvider 
       } catch {
         throw new FaceProviderError('transient'); // network error or timeout
       }
-      let json: { FaceMatches?: { Similarity?: number }[]; UnmatchedFaces?: unknown[]; __type?: string; message?: string; Message?: string } = {};
+      let json: {
+        FaceMatches?: { Similarity?: number; Face?: { BoundingBox?: AwsBox } }[];
+        UnmatchedFaces?: { BoundingBox?: AwsBox }[];
+        __type?: string;
+        message?: string;
+        Message?: string;
+      } = {};
       try {
         json = await res.json();
       } catch {
@@ -83,6 +98,12 @@ export function createRekognitionProvider(cfg: RekognitionConfig): FaceProvider 
       return {
         similarity: sims.length ? Math.max(...sims) : null,
         targetHadFace: sims.length > 0 || unmatched > 0,
+        detail: {
+          qualityFilter: QUALITY_FILTER,
+          providerFloor: cfg.similarityThreshold,
+          matches: (json.FaceMatches ?? []).map((m) => ({ similarity: m.Similarity ?? 0, box: boxSize(m.Face) })),
+          unmatched: (json.UnmatchedFaces ?? []).map((f) => ({ box: boxSize(f) })),
+        },
       };
     },
   };

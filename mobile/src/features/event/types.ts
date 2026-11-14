@@ -14,6 +14,8 @@ export type QrewingError =
   | 'too_early'
   | 'not_consented'
   | 'ask_limit'
+  | 'unclear'
+  | 'rate_limited'
   | 'ai_failed'
   | 'network';
 
@@ -51,6 +53,9 @@ export type RecapResult = {
   highlights: string[];
   generatedAt: string;
   cached: boolean;
+  /** With `diary: true` (Qrewing Calendar): one emoji for the room's purpose and 1-3 first-person lines, or null. */
+  emoji?: string;
+  diary?: string[] | null;
 };
 
 /** 2.3 match response item */

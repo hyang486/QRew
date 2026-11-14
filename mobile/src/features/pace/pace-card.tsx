@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
 import { Button, colors, Hint, radius } from '@/components/ui';
@@ -17,6 +17,7 @@ import {
 } from './pace-core';
 import { paceApplies } from './pace-layer';
 import { saveTarget, setOn, usePaceSettings } from './settings';
+import { initialPaceSec, targetFieldsFilled } from './target-form';
 import { en } from '@/i18n/en';
 const t = en.pace;
 
@@ -59,7 +60,13 @@ type Mode = PaceTarget['kind'];
 
 function TargetEditor({ target, usual }: { target: PaceTarget; usual: number | null }) {
   const [mode, setMode] = useState<Mode>(target.kind);
-  const [pace, setPace] = useState(target.kind === 'pace' ? (formatPace(target.secPerKm) ?? '') : '');
+  // E2E (j): prefilled with my target or usual pace; with neither, empty under an "e.g." hint.
+  const [pace, setPace] = useState(formatPace(initialPaceSec(target, usual)) ?? '');
+  const paceTouched = useRef(false);
+  // The usual pace can arrive after mount (history loads); fill it in unless I already typed.
+  useEffect(() => {
+    if (!paceTouched.current && usual != null && target.kind !== 'pace') setPace((p) => p || (formatPace(usual) ?? ''));
+  }, [usual, target.kind]);
   const [km, setKm] = useState(target.kind === 'time' ? String(target.distanceM / 1000) : '');
   const [time, setTime] = useState(target.kind === 'time' ? formatDuration(target.timeS) : '');
   const [error, setError] = useState<string | null>(null);
@@ -129,7 +136,10 @@ function TargetEditor({ target, usual }: { target: PaceTarget; usual: number | n
         <View style={styles.inputRow}>
           <TextInput
             value={pace}
-            onChangeText={setPace}
+            onChangeText={(v) => {
+              paceTouched.current = true;
+              setPace(v);
+            }}
             placeholder={t.pacePlaceholder}
             keyboardType="numbers-and-punctuation"
             accessibilityLabel={t.targetPace}
@@ -162,7 +172,12 @@ function TargetEditor({ target, usual }: { target: PaceTarget; usual: number | n
           {shown ? <Text style={styles.unit}>{`${formatPace(shown)} ${t.perKm}`}</Text> : null}
         </View>
       ) : null}
-      {mode !== 'usual' ? <Button title={t.save} variant="secondary" onPress={save} /> : null}
+      {mode !== 'usual' ? (
+        <Button title={t.save} variant="secondary" onPress={save} disabled={!targetFieldsFilled(mode, pace, km, time)} />
+      ) : null}
+      {mode !== 'usual' && !targetFieldsFilled(mode, pace, km, time) ? (
+        <Hint>{mode === 'pace' ? t.paceEmpty : t.timeEmpty}</Hint>
+      ) : null}
       {error ? <Hint tone="error">{error}</Hint> : null}
       {saved && !error ? <Hint>{t.saved}</Hint> : null}
     </View>

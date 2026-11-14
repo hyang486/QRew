@@ -10,15 +10,16 @@ import { HandTitle } from '@/components/hand-title';
 import { qSpacing } from '@/components/q-screen';
 import { Button, colors, radius } from '@/components/ui';
 import { en } from '@/i18n/en';
-import { type Camera, formatRouteKm, type LatLng, MAX_ROUTE_POINTS } from '@/lib/location-plan';
+import { type Camera, formatRouteKm, type LatLng, MAX_ROUTE_POINTS, routeLengthMeters } from '@/lib/location-plan';
 import { NO_POIS } from '@/lib/map-pois';
+import { MAX_ROUTE_KM, routeTooLong } from '@/lib/route-editor-plan';
 import { appendStroke, isFlatNorthUp, joinStrokes, type MapRegion, type Point, type Size, strokeToRoute } from '@/lib/route-draw';
 
 const ROUTE_COLOR = '#FF9500';
 /** R1-A: how long a Pen press waits for its camera move to report back. */
 const PEN_WAIT_MS = 2000;
 
-type PenNote = 'none' | 'wait' | 'northUp' | 'truncated';
+type PenNote = 'none' | 'wait' | 'northUp' | 'truncated' | 'tooFar';
 
 /**
  * R1-C: the full-screen route editor. A Modal sits outside the navigation stack, so the iOS back-swipe cannot
@@ -151,6 +152,15 @@ export function RouteEditor({
   }
 
   const canUndo = draft.length > undoFloor;
+  // UI v2 (2): a route over MAX_ROUTE_KM is not saved (a swipe across a zoomed-out map drew an ocean crossing).
+  function save() {
+    if (routeTooLong(routeLengthMeters(route))) {
+      setNote('tooFar');
+      return;
+    }
+    onSave(route);
+  }
+
   const hint =
     note === 'wait'
       ? en.map.penWait
@@ -158,7 +168,9 @@ export function RouteEditor({
         ? en.map.penNorthUp
         : note === 'truncated'
           ? en.map.routeTooLong(MAX_ROUTE_POINTS)
-          : pen
+          : note === 'tooFar'
+            ? en.map.routeTooFar(MAX_ROUTE_KM)
+            : pen
             ? en.map.penOnHint
             : en.map.penOffHint;
 
@@ -254,7 +266,7 @@ export function RouteEditor({
         </View>
 
         <View style={[styles.actions, { paddingBottom: Math.max(insets.bottom, 12) + 8 }]}>
-          <Button title={en.map.saveRoute} busy={saving} onPress={() => onSave(route)} />
+          <Button title={en.map.saveRoute} busy={saving} onPress={save} />
         </View>
       </GestureHandlerRootView>
     </Modal>

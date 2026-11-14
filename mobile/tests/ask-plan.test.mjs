@@ -1,6 +1,7 @@
 // Run: npm test. Private Qrewing chat (spec 10.3, 10.4): history trim, parse and purge, the ask request shape and
 // bounds, and the error mapping (plan, API with a fake invoke, and the AsyncStorage store stubbed in-process).
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { test } from 'node:test';
 
@@ -119,4 +120,56 @@ test('the store appends up to 30 turns and purges one room or every stale room',
   assert.deepEqual(await store.loadAskHistory('a'), []);
   await store.purgeStaleAskHistories(['b']);
   assert.deepEqual([...globalThis.__askStore.keys()].sort(), ['other.key', 'qrewing.ask.v1.b']);
+});
+
+test('askAnchor (bug b): place pin first, else my own start point, else left out', () => {
+  const pin = { latitude: 37.5, longitude: 127.0 };
+  const start = { latitude: 37.6, longitude: 126.9 };
+  assert.deepEqual(plan.askAnchor(pin, start), { lat: 37.5, lng: 127.0 });
+  assert.deepEqual(plan.askAnchor(null, start), { lat: 37.6, lng: 126.9 });
+  assert.equal(plan.askAnchor(null, null), undefined);
+  assert.equal(plan.askAnchor(undefined, undefined), undefined);
+  // Out of range or non-finite values are never sent (the server answers 400 to them).
+  assert.deepEqual(plan.askAnchor({ latitude: 91, longitude: 0 }, start), { lat: 37.6, lng: 126.9 });
+  assert.equal(plan.askAnchor({ latitude: NaN, longitude: 0 }, { latitude: 0, longitude: 181 }), undefined);
+});
+
+test('askAnchor (s11): place pin, then pace start, then my first shared point, else left out', () => {
+  const pin = { latitude: 37.5, longitude: 127.0 };
+  const start = { latitude: 37.6, longitude: 126.9 };
+  const first = { latitude: 37.7, longitude: 126.8 };
+  assert.deepEqual(plan.askAnchor(pin, start, first), { lat: 37.5, lng: 127.0 });
+  assert.deepEqual(plan.askAnchor(null, start, first), { lat: 37.6, lng: 126.9 });
+  assert.deepEqual(plan.askAnchor(null, null, first), { lat: 37.7, lng: 126.8 });
+  assert.equal(plan.askAnchor(null, null, null), undefined);
+  assert.equal(plan.askAnchor(null, null, { latitude: 0, longitude: 200 }), undefined);
+});
+
+test('first shared point (s11): only my own successful report records it, in memory, cleared on sign-out and opt-out', () => {
+  const src = readFileSync(new URL('../src/lib/location.ts', import.meta.url), 'utf8');
+  const sets = [...src.matchAll(/firstShared\.set\(/g)];
+  assert.equal(sets.length, 1, 'one writer');
+  // The writer sits in the reporter's report(), after the report_location RPC answered true (my own device's fix).
+  const report = src.slice(src.indexOf('const report = async'), src.indexOf('const onWatchReading'));
+  assert.ok(report.includes('firstShared.set('), 'set inside report()');
+  assert.ok(report.indexOf('firstShared.set(') > report.indexOf("if (data === false)"), 'after the refusal check');
+  // Never from other members' rows, never on disk.
+  const presence = src.slice(src.indexOf('export function useLivePresence'));
+  assert.doesNotMatch(presence, /firstShared/);
+  assert.doesNotMatch(src, /AsyncStorage|SecureStore/);
+  assert.match(src, /SIGNED_OUT[\s\S]{0,80}firstShared\.clear\(\)/);
+  const setConsent = src.slice(src.indexOf('function setConsent'), src.indexOf('/** Called by LocationReporters'));
+  assert.match(setConsent, /firstShared\.delete\(roomId\)/);
+  const ask = readFileSync(new URL('../src/features/event/ask-screen.tsx', import.meta.url), 'utf8');
+  assert.match(ask, /askAnchor\(place, paceStartPoint\(data\), myFirstSharedPoint\(roomId\)\)/);
+});
+
+test('askBody: anchor is sent as {lat,lng} only when known', () => {
+  assert.deepEqual(plan.askBody('r1', 'q', [], null, undefined, { lat: 1, lng: 2 }), {
+    action: 'ask',
+    roomId: 'r1',
+    question: 'q',
+    anchor: { lat: 1, lng: 2 },
+  });
+  assert.equal('anchor' in plan.askBody('r1', 'q', [], null, 'UTC'), false);
 });

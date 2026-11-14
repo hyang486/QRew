@@ -3,6 +3,14 @@
 // "who is the caller" lives here so it can be unit tested with a fake store and a fake model (qrewing.test.ts).
 import {
   ASK_MODEL,
+  CALENDAR_MODEL,
+  CALENDAR_SCHEMA,
+  CALENDAR_SYSTEM,
+  calendarUser,
+  DIARY_MODEL,
+  DIARY_SCHEMA,
+  DIARY_SYSTEM,
+  diaryUser,
   ASK_SCHEMA,
   ASK_SYSTEM,
   askUser,
@@ -24,6 +32,7 @@ import {
   triageUser,
   type AskFacts,
   type AskMe,
+  type AskGroup,
   type AskTurn,
   type MatchPerson,
   type MatchQuestion,
@@ -65,6 +74,16 @@ export const ASK_CHAT_LINES = 60;
 export const ASK_CHAT_CHARS = 6000;
 export const ASK_LINE_MAX = 300;
 export const ASK_ENTRY_PEOPLE = 30;
+/** E2E (a): status/Emergency lines in the ask and recap context, each cut to ASK_EVENT_LINE_MAX. */
+export const ASK_EVENT_LINES = 30;
+export const ASK_EVENT_LINE_MAX = 120;
+export const ASK_EMERGENCIES = 5;
+/** E2E (b): members listed in <group>; a position older than POSITION_FRESH_MS is left out. */
+export const ASK_GROUP_MAX = 30;
+export const POSITION_FRESH_MS = 2 * 60_000;
+/** Same as the client's pace engine: the lead group is everyone within 50 m of the front; moving = at least 0.5 m/s. */
+export const LEAD_GROUP_SPAN_M = 50;
+export const MOVING_MPS = 0.5;
 export const ASK_ANSWER_MAX = 600;
 /** Spec 10.3 `me`: the asker's own snapshot from their phone. Only these fields, in these closed ranges. */
 export const ASK_ME_RANGES = {
@@ -72,6 +91,17 @@ export const ASK_ME_RANGES = {
   distanceM: [0, 1_000_000],
   paceSecPerKm: [0, 3600],
 } as const;
+/** Qrewing Calendar: the per-member diary (a second small call on top of the shared recap). Counted per user per room. */
+export const DIARY_USER_CAP = 3;
+export const DIARY_LINES = 3;
+export const DIARY_LINE_MAX = 90;
+/** Always-present emoji when the diary call is skipped, fails or returns no single emoji. Keys = rooms.type values. */
+export const ROOM_TYPE_EMOJI: Record<string, string> = { sports: '🏃', event: '🎉', waiting: '⏳', general: '💬' };
+/** Qrewing Calendar: calendar_add caps and limits. */
+export const CALENDAR_USER_CAP = 20;
+export const CALENDAR_TEXT_MAX = 300;
+export const CALENDAR_TITLE_MAX = 60;
+export const CALENDAR_SPAN_DAYS = 366;
 /** input_hash prefix of a qrewing_matches row that a caller is computing (no new column; 0027 is frozen). */
 export const MATCH_PENDING_PREFIX = 'pending:';
 /**
@@ -163,7 +193,19 @@ export type Consent = { aiOk: boolean; mute: boolean };
 export type TriageSource = 'model' | 'rule';
 export type UsageAction = 'triage' | 'recap' | 'match' | 'ask';
 /** Room columns only the bot reads. route: rooms.route points (lat/lng are used for the distance only, never sent). */
-export type RoomExtras = { activityState: string; route: { lat: number; lng: number }[]; statusLabels: string[] };
+export type RoomExtras = {
+  activityState: string;
+  route: { lat: number; lng: number }[];
+  statusLabels: string[];
+  /** rooms.location_allowed: the host allows location sharing. */
+  locationAllowed: boolean;
+  /** The room's place pin, or null. */
+  place: { lat: number; lng: number } | null;
+};
+/** An emergency_events row with the user ids that acknowledged it (emergency_acks). */
+export type Emergency = { id: string; userId: string; createdAt: string; ackedBy: string[] };
+/** A live_presence row; `sharing` = room_members.share_location of that member (core filters on it). */
+export type LivePosition = { userId: string; lat: number; lng: number; speedMps: number | null; updatedAt: string; sharing: boolean };
 
 export interface QrewingStore {
   room(roomId: string): Promise<RoomInfo | null>;
@@ -234,6 +276,12 @@ export interface QrewingStore {
   /** private.qrewing_usage rows of the room with this action at or after `since`; only this user's rows when given (0029). */
   usageCountSince(roomId: string, action: UsageAction, since: string, userId?: string): Promise<number>;
   roomExtras(roomId: string): Promise<RoomExtras>;
+  /** E2E (a): up to `limit` latest 'status' and 'emergency' messages of the room, newest first. */
+  roomEvents(roomId: string, limit: number): Promise<Msg[]>;
+  /** E2E (a): up to `limit` latest emergency_events of the room with their acks, newest first. */
+  emergencies(roomId: string, limit: number): Promise<Emergency[]>;
+  /** E2E (b): the room's live_presence rows, each with its member's share_location. */
+  livePositions(roomId: string): Promise<LivePosition[]>;
 }
 
 export type Deps = {
@@ -252,9 +300,10 @@ export type Reply = { status: number; body: unknown };
 type Body =
   | { action: 'probe'; roomId: string | null }
   | { action: 'triage'; roomId: string; messageIds: string[] }
-  | { action: 'recap'; roomId: string; refresh: boolean }
+  | { action: 'recap'; roomId: string; refresh: boolean; diary: boolean }
+  | { action: 'calendar_add'; text: string; today: string; tz: string }
   | { action: 'match'; roomId: string }
-  | { action: 'ask'; roomId: string; question: string; history: AskTurn[]; me: AskMe | null; tz: string };
+  | { action: 'ask'; roomId: string; question: string; history: AskTurn[]; me: AskMe | null; tz: string; anchor: GeoPoint | null };
 
 const isObj = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 /** Trimmed text of 1..max code points, else null. */
@@ -280,6 +329,20 @@ export function parseMe(raw: unknown): AskMe | null | undefined {
     out.activity = raw.activity;
   }
   return out;
+}
+
+export type GeoPoint = { lat: number; lng: number };
+
+/**
+ * E2E (b): the asker's pace anchor (where their activity started), the same one the pace screen uses when the room
+ * has no route and no place pin. undefined = invalid (400). Absent = null. Never forwarded to the model.
+ */
+export function parseAnchor(raw: unknown): GeoPoint | null | undefined {
+  if (raw === undefined || raw === null) return null;
+  if (!isObj(raw)) return undefined;
+  const { lat, lng } = raw;
+  if (typeof lat !== 'number' || typeof lng !== 'number' || !Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
+  return Math.abs(lat) <= 90 && Math.abs(lng) <= 180 ? { lat, lng } : undefined;
 }
 
 /** undefined = invalid. Up to 4 turns of {q, a}, each 1..300 chars after trim; extra keys dropped. */
@@ -338,7 +401,7 @@ function localParts(d: Date, tz: string) {
 }
 
 /**
- * Friendly local time for the ask context: "today at 1:28 PM" / "Fri, Nov 13 at 9:00 AM" (en, 12 h) or
+ * Friendly local time for the ask context: "1:28 PM today" / "9:00 AM on Fri, Nov 13" (en, 12 h) or
  * "오늘 13:28" / "11월 13일 (금) 09:00" (ko, 24 h). Relative words only for yesterday/today/tomorrow, relative to `now`
  * in `tz`; the year is added when it differs from now's. `absolute` skips the relative words (used for <now> itself).
  */
@@ -355,8 +418,9 @@ export function friendlyTime(isoStr: string, tz: string, now: Date, lang: AskLan
   }
   const clock = `${t.h % 12 === 0 ? 12 : t.h % 12}:${mm} ${t.h < 12 ? 'AM' : 'PM'}`;
   const rel = absolute ? null : ({ [-1]: 'yesterday', 0: 'today', 1: 'tomorrow' } as Record<number, string>)[diff];
-  if (rel) return `${rel} at ${clock}`;
-  return `${WEEKDAYS[t.wd]}, ${MONTHS[t.m - 1]} ${t.day}${t.y !== n.y ? `, ${t.y}` : ''} at ${clock}`;
+  // Clock first, so a preposition the model adds reads right: "at 1:28 PM today", never "at today at 1:28 PM".
+  if (rel) return `${clock} ${rel}`;
+  return `${clock} on ${WEEKDAYS[t.wd]}, ${MONTHS[t.m - 1]} ${t.day}${t.y !== n.y ? `, ${t.y}` : ''}`;
 }
 
 export function parseBody(raw: unknown): Body | null {
@@ -376,7 +440,16 @@ export function parseBody(raw: unknown): Body | null {
     }
     case 'recap':
       if (!roomOk || (b.refresh !== undefined && typeof b.refresh !== 'boolean')) return null;
-      return { action: 'recap', roomId: b.roomId as string, refresh: b.refresh === true };
+      if (b.diary !== undefined && typeof b.diary !== 'boolean') return null;
+      return { action: 'recap', roomId: b.roomId as string, refresh: b.refresh === true, diary: b.diary === true };
+    case 'calendar_add': {
+      const text = askText(b.text, CALENDAR_TEXT_MAX);
+      const today = typeof b.today === 'string' ? dayNumber(b.today) : null;
+      // tz is required here (no UTC default): "this Saturday" depends on it.
+      const tz = b.tz === undefined || b.tz === null ? undefined : parseTz(b.tz);
+      if (text === null || today === null || tz === undefined) return null;
+      return { action: 'calendar_add', text, today: b.today as string, tz };
+    }
     case 'match':
       return roomOk ? { action: 'match', roomId: b.roomId as string } : null;
     case 'ask': {
@@ -384,8 +457,9 @@ export function parseBody(raw: unknown): Body | null {
       const history = parseHistory(b.history);
       const me = parseMe(b.me);
       const tz = parseTz(b.tz);
-      if (!roomOk || question === null || history === undefined || me === undefined || tz === undefined) return null;
-      return { action: 'ask', roomId: b.roomId as string, question, history, me, tz };
+      const anchor = parseAnchor(b.anchor);
+      if (!roomOk || question === null || history === undefined || me === undefined || tz === undefined || anchor === undefined) return null;
+      return { action: 'ask', roomId: b.roomId as string, question, history, me, tz, anchor };
     }
     default:
       return null;
@@ -404,6 +478,8 @@ export async function handle(deps: Deps, userId: string, rawBody: unknown): Prom
   if (!body) return { status: 400, body: { error: 'bad_request' } };
   if (!deps.model) return { status: 503, body: { error: 'ai_not_configured' } };
   if (body.action === 'probe' && body.roomId === null) return { status: 200, body: { ok: true } };
+  // No room: authenticated user only (index.ts checked the JWT). No Plus check here; the server has no plan data.
+  if (body.action === 'calendar_add') return calendarAdd({ ...deps, model: deps.model, now, log: deps.log ?? (() => {}) }, userId, body);
 
   const clock = deps.clock ?? Date.now;
   const gateStart = clock();
@@ -427,8 +503,10 @@ export async function handle(deps: Deps, userId: string, rawBody: unknown): Prom
       return { status: 200, body: { ok: true } };
     case 'triage':
       return triage(ctx, body.messageIds);
-    case 'recap':
-      return body.refresh ? recapRefresh(ctx) : recap(ctx);
+    case 'recap': {
+      const res = await (body.refresh ? recapRefresh(ctx) : recap(ctx));
+      return body.diary ? withDiary(ctx, res) : res;
+    }
     case 'match':
       return match(ctx);
     case 'ask':
@@ -451,7 +529,8 @@ const AI_FAILED: Reply = { status: 502, body: { error: 'ai_failed' } };
 
 /** One model call with the shared rules: usage logged, refusal/max_tokens/invalid JSON = failure (no retry). */
 async function callModel(
-  ctx: Ctx,
+  /** room.id = the usage row's room_id (calendar_add passes its usage key, see calendarUsage). */
+  ctx: Pick<Ctx, 'model' | 'store' | 'log'> & { room: { id: string } },
   action: UsageAction,
   req: ModelRequest,
   userId?: string,
@@ -718,7 +797,8 @@ async function recap(ctx: Ctx): Promise<Reply> {
     .filter((m) => ok(m.senderId) && m.body?.trim())
     .slice(0, RECAP_MESSAGES)
     .reverse();
-  const names = await store.displayNames([...new Set(msgs.map((m) => m.senderId!))]);
+  const hist = roomHistory(await store.roomEvents(room.id, ASK_EVENT_LINES * 2), await store.emergencies(room.id, ASK_EMERGENCIES * 2), ok);
+  const names = await store.displayNames(historyIds(msgs, hist));
   const media = await store.mediaCounts(room.id);
 
   const r = await callModel(ctx, 'recap', {
@@ -733,7 +813,8 @@ async function recap(ctx: Ctx): Promise<Reply> {
       startsAt: room.startsAt,
       photos: media.photos,
       videos: media.videos,
-      lines: msgs.map((m) => recapLine(names.get(m.senderId!), m.body)),
+      lines: timeline(msgs, hist.lines, names),
+      emergencies: recapAlerts(hist.alerts, names),
     }),
     schema: RECAP_SCHEMA,
   });
@@ -768,13 +849,19 @@ async function recapRefresh(ctx: Ctx): Promise<Reply> {
     .filter((m) => ok(m.senderId) && m.body?.trim())
     .slice(0, RECAP_REFRESH_MESSAGES)
     .reverse();
-  if (newer.length === 0) return { status: 200, body: recapBody(existing, true) };
+  const all = roomHistory(await store.roomEvents(room.id, ASK_EVENT_LINES * 2), await store.emergencies(room.id, ASK_EMERGENCIES * 2), ok);
+  const hist = {
+    lines: all.lines.filter((m) => m.createdAt > existing.createdAt),
+    // An Emergency is new, or newly resolved (its resolving line came after the recap).
+    alerts: all.alerts.filter((e) => e.createdAt > existing.createdAt || (e.resolved && all.lines.some((m) => m.kind === 'status' && m.senderId === e.userId && m.createdAt > existing.createdAt))),
+  };
+  if (newer.length === 0 && hist.lines.length === 0) return { status: 200, body: recapBody(existing, true) };
   if (!(await store.claimRecapRefresh(room.id))) {
     const again = await store.recap(room.id);
     return { status: 200, body: recapBody(again?.state === 'done' ? again : existing, true) };
   }
 
-  const names = await store.displayNames([...new Set(newer.map((m) => m.senderId!))]);
+  const names = await store.displayNames(historyIds(newer, hist));
   const r = await callModel(ctx, 'recap', {
     model: RECAP_MODEL,
     effort: 'medium',
@@ -783,7 +870,8 @@ async function recapRefresh(ctx: Ctx): Promise<Reply> {
     system: RECAP_REFRESH_SYSTEM,
     user: recapRefreshUser({
       previous: { title: existing.title ?? '', summary: existing.summary ?? '', highlights: existing.highlights ?? [] },
-      lines: newer.map((m) => recapLine(names.get(m.senderId!), m.body)),
+      lines: timeline(newer, hist.lines, names),
+      emergencies: recapAlerts(hist.alerts, names),
     }),
     schema: RECAP_SCHEMA,
   });
@@ -792,6 +880,27 @@ async function recapRefresh(ctx: Ctx): Promise<Reply> {
   if (!out) return AI_FAILED;
   const saved = await store.saveRecapRefresh(room.id, out);
   return { status: 200, body: recapBody(saved ?? { ...existing, ...out }, false) };
+}
+
+function historyIds(msgs: Msg[], hist: ReturnType<typeof roomHistory>): string[] {
+  return [...new Set([...msgs, ...hist.lines].map((m) => m.senderId!).concat(hist.alerts.flatMap((e) => [e.userId, ...e.ackedBy])))];
+}
+
+/** E2E (a): chat and status/Emergency lines in time order; event lines are marked so they read as app-posted. */
+function timeline(msgs: Msg[], events: Msg[], names: Map<string, string>) {
+  return [...msgs, ...events]
+    .sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0))
+    .map((m) => {
+      const name = names.get(m.senderId!);
+      if (m.kind === 'text') return recapLine(name, m.body);
+      const tag = m.kind === 'emergency' ? '[Emergency]' : '[status change]';
+      return recapLine(name, `${tag} ${eventText(m.body ?? '', name)}`);
+    });
+}
+
+function recapAlerts(alerts: ReturnType<typeof roomHistory>['alerts'], names: Map<string, string>) {
+  const n = (id: string) => cut((names.get(id) || 'Member').replace(/\s+/g, ' '), 40) || 'Member';
+  return alerts.map((e) => ({ who: n(e.userId), resolved: e.resolved, seenBy: e.ackedBy.map(n) }));
 }
 
 /** L5: one chat line per message ("sender: text"), so a newline in a name or body cannot fake another speaker. */
@@ -815,6 +924,144 @@ function cleanRecap(data: unknown): { title: string; summary: string; highlights
 
 function recapBody(r: RecapRow, cached: boolean) {
   return { state: 'done', title: r.title, summary: r.summary, highlights: r.highlights ?? [], generatedAt: r.updatedAt, cached };
+}
+
+// ---------------------------------------------------------------------------------------------- calendar (Plus)
+
+/**
+ * Qrewing Calendar, recap diary. Runs only on a 200 recap with diary:true, as a second small call per member: the
+ * shared room_recaps row is cached per room, so a per-member diary cannot ride in that call. Input = the stored
+ * (consent-clean) recap + the caller's own display name only if they consented. Nothing stored. Logged as 'recap' with
+ * user_id (the room-level recap rows have none, so only diary calls count); DIARY_USER_CAP per user per room per 24 h.
+ * `emoji` is always present: the diary call's emoji when it returned exactly one, else ROOM_TYPE_EMOJI[room.type].
+ * Any diary failure (cap, store error, model error, bad output) gives diary: null, never a non-200 for the recap.
+ */
+async function withDiary(ctx: Ctx, res: Reply): Promise<Reply> {
+  if (res.status !== 200) return res;
+  const recap = res.body as ReturnType<typeof recapBody>;
+  const fallback = ROOM_TYPE_EMOJI[ctx.room.type] ?? ROOM_TYPE_EMOJI.general;
+  let emoji = fallback;
+  let diary: string[] | null = null;
+  try {
+    const since = new Date(ctx.now.getTime() - ASK_WINDOW_MS).toISOString();
+    if ((await ctx.store.usageCountSince(ctx.room.id, 'recap', since, ctx.userId)) >= DIARY_USER_CAP) {
+      ctx.log('diary_capped', { cap: DIARY_USER_CAP });
+    } else {
+      const consents = await ctx.store.consents(ctx.room.id);
+      const name = consents.get(ctx.userId)?.aiOk === true ? (await ctx.store.displayNames([ctx.userId])).get(ctx.userId) : undefined;
+      const r = await callModel(ctx, 'recap', {
+        model: DIARY_MODEL,
+        effort: 'low',
+        maxTokens: 1024,
+        system: DIARY_SYSTEM,
+        user: diaryUser({
+          roomName: ctx.room.name,
+          roomType: ctx.room.type,
+          me: name ? flatCut(name, 40) || null : null,
+          recap: { title: recap.title ?? '', summary: recap.summary ?? '', highlights: recap.highlights ?? [] },
+        }),
+        schema: DIARY_SCHEMA,
+      }, ctx.userId);
+      if (r.ok) {
+        const d = cleanDiary(r.data);
+        emoji = d.emoji ?? fallback;
+        diary = d.diary;
+      }
+    }
+  } catch {
+    ctx.log('diary_failed', {});
+  }
+  return { status: 200, body: { ...recap, emoji, diary } };
+}
+
+/** Model diary output → one emoji (or null) and 1..DIARY_LINES clean lines (or null when none survive). */
+export function cleanDiary(data: unknown): { emoji: string | null; diary: string[] | null } {
+  const d = data as { emoji?: unknown; diary?: unknown } | null;
+  const lines = (Array.isArray(d?.diary) ? d!.diary : [])
+    .filter((l): l is string => typeof l === 'string')
+    .map((l) => flatCut(cleanText(l), DIARY_LINE_MAX))
+    .filter((l) => l !== '')
+    .slice(0, DIARY_LINES);
+  return { emoji: oneEmoji(d?.emoji), diary: lines.length > 0 ? lines : null };
+}
+
+/** Exactly one grapheme that is an emoji (pictographic or a flag), else null. */
+export function oneEmoji(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const t = raw.trim();
+  if (!t || t.length > 32) return null;
+  const n = Array.from(new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(t)).length;
+  return n === 1 && /\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(t) ? t : null;
+}
+
+/** Control and bidi-override characters removed (titles and diary lines are shown verbatim on the phone). */
+export function cleanText(s: string): string {
+  return s.replace(/[\p{Cc}​‎‏‪-‮⁦-⁩﻿]/gu, ' ');
+}
+
+/** 'YYYY-MM-DD' of a real calendar date → days since the epoch, else null. */
+export function dayNumber(s: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+  if (!m) return null;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const t = Date.UTC(y, mo - 1, d);
+  const back = new Date(t);
+  if (back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d) return null;
+  return t / 86_400_000;
+}
+
+/**
+ * calendar_add is logged as action 'ask' with room_id = caller id; counts only (no text). Replace with action
+ * 'calendar' in a future migration. Known debt: 0029 allows only triage|recap|match|ask and counts by room_id, so this
+ * key is the one no-migration way to count per user. A user id never equals a room id, so these rows never count
+ * toward a real room's ask cap (room_id = room) or a member's in-room ask cap (room_id = room and user_id = member).
+ */
+export function calendarUsage(userId: string): { roomId: string; action: UsageAction } {
+  return { roomId: userId, action: 'ask' };
+}
+
+type CalendarCtx = Pick<Ctx, 'model' | 'store' | 'log' | 'now'>;
+
+/**
+ * Qrewing Calendar: free text → one date-only entry. 200 {event:{title,start,end,emoji}} (end inclusive, ≥ start,
+ * ≤ start + CALENDAR_SPAN_DAYS); 422 unclear; 429 rate_limited (CALENDAR_USER_CAP per 24 h); 502 ai_failed.
+ * The text is never logged or stored.
+ */
+async function calendarAdd(ctx: CalendarCtx, userId: string, body: { text: string; today: string; tz: string }): Promise<Reply> {
+  const key = calendarUsage(userId);
+  const since = new Date(ctx.now.getTime() - ASK_WINDOW_MS).toISOString();
+  if ((await ctx.store.usageCountSince(key.roomId, key.action, since, userId)) >= CALENDAR_USER_CAP) {
+    return { status: 429, body: { error: 'rate_limited' } };
+  }
+  const weekday = WEEKDAYS[new Date(dayNumber(body.today)! * 86_400_000).getUTCDay()];
+  const r = await callModel({ ...ctx, room: { id: key.roomId } }, key.action, {
+    model: CALENDAR_MODEL,
+    effort: 'low',
+    maxTokens: 512,
+    system: CALENDAR_SYSTEM,
+    user: calendarUser({ text: body.text, today: body.today, weekday, tz: body.tz }),
+    schema: CALENDAR_SCHEMA,
+  }, userId);
+  if (!r.ok) return r.kind === 'refusal' ? UNCLEAR : AI_FAILED;
+  const event = cleanCalendar(r.data);
+  if (!event) {
+    ctx.log('calendar_unclear', {});
+    return UNCLEAR;
+  }
+  return { status: 200, body: { event } };
+}
+
+const UNCLEAR: Reply = { status: 422, body: { error: 'unclear' } };
+
+/** Strict check of the model's calendar JSON; null (→ unclear) on anything off. */
+export function cleanCalendar(data: unknown): { title: string; start: string; end: string; emoji: string } | null {
+  const d = data as { clear?: unknown; title?: unknown; start?: unknown; end?: unknown; emoji?: unknown } | null;
+  if (d?.clear !== true || typeof d.title !== 'string' || typeof d.start !== 'string' || typeof d.end !== 'string') return null;
+  const title = flatCut(cleanText(d.title), CALENDAR_TITLE_MAX);
+  const s = dayNumber(d.start);
+  const e = dayNumber(d.end);
+  if (!title || s === null || e === null || e < s || e - s > CALENDAR_SPAN_DAYS) return null;
+  return { title, start: d.start, end: d.end, emoji: oneEmoji(d.emoji) ?? '📅' };
 }
 
 // ---------------------------------------------------------------------------------------------- match
@@ -980,13 +1227,13 @@ export function compactPerson(name: string, p: Pick<EntryProfile, 'answers' | 'h
  * usage row (token counts) is written. Context: room facts, chat of consenting members, entry answers of consenting
  * members (links never), the asker's own `me` snapshot and their on-device history. Never user ids, coordinates or links.
  */
-async function ask(ctx: Ctx, body: { question: string; history: AskTurn[]; me: AskMe | null; tz: string }): Promise<Reply> {
+async function ask(ctx: Ctx, body: { question: string; history: AskTurn[]; me: AskMe | null; tz: string; anchor?: GeoPoint | null }): Promise<Reply> {
   const { store, room, now } = ctx;
   const lang = questionLang(body.question);
   const contextStart = ctx.clock();
   const since = new Date(now.getTime() - ASK_WINDOW_MS).toISOString();
   // Latency: all reads start together; unwrapped in the old order (consent gate → caps → context), so the replies match.
-  const [consentsS, userS, roomUseS, extrasS, membersS, msgsS, questionsS, profilesS] = await Promise.allSettled([
+  const [consentsS, userS, roomUseS, extrasS, membersS, msgsS, questionsS, profilesS, eventsS, alertsS, positionsS] = await Promise.allSettled([
     store.consents(room.id),
     store.usageCountSince(room.id, 'ask', since, ctx.userId),
     store.usageCountSince(room.id, 'ask', since),
@@ -995,6 +1242,9 @@ async function ask(ctx: Ctx, body: { question: string; history: AskTurn[]; me: A
     store.latestText(room.id, ASK_CHAT_LINES * 2),
     store.entryQuestions(room.id),
     store.entryProfiles(room.id),
+    store.roomEvents(room.id, ASK_EVENT_LINES * 2),
+    store.emergencies(room.id, ASK_EMERGENCIES * 2),
+    store.livePositions(room.id),
   ]);
   const consents = got(consentsS);
   if (consents.get(ctx.userId)?.aiOk !== true) return { status: 403, body: { error: 'not_consented' } };
@@ -1005,7 +1255,9 @@ async function ask(ctx: Ctx, body: { question: string; history: AskTurn[]; me: A
 
   const ok = (id: string | null) => !!id && consents.get(id)?.aiOk === true;
   const [extras, members, msgsRaw, questionRows, profiles] = [got(extrasS), got(membersS), got(msgsS), got(questionsS), got(profilesS)];
+  const [eventsRaw, alertsRaw, positions] = [got(eventsS), got(alertsS), got(positionsS)];
   const memberSet = new Set(members);
+  const history = roomHistory(eventsRaw, alertsRaw, ok);
   // Newest first: keep consenting lines until ASK_CHAT_LINES or about ASK_CHAT_CHARS, then oldest first.
   const msgs: typeof msgsRaw = [];
   let chars = 0;
@@ -1023,8 +1275,20 @@ async function ask(ctx: Ctx, body: { question: string; history: AskTurn[]; me: A
       a.userId === ctx.userId ? -1 : b.userId === ctx.userId ? 1 : a.updatedAt !== b.updatedAt ? (a.updatedAt > b.updatedAt ? -1 : 1) : a.userId < b.userId ? -1 : 1,
     )
     .slice(0, ASK_ENTRY_PEOPLE);
-  const names = await store.displayNames([...new Set([ctx.userId, ...msgs.map((m) => m.senderId!), ...people.map((p) => p.userId)])]);
+  const sharers = positions.filter((p) => p.sharing && ok(p.userId) && memberSet.has(p.userId)).map((p) => p.userId);
+  const names = await store.displayNames([...new Set([
+    ctx.userId,
+    ...msgs.map((m) => m.senderId!),
+    ...people.map((p) => p.userId),
+    ...history.lines.map((m) => m.senderId!),
+    ...history.alerts.flatMap((e) => [e.userId, ...e.ackedBy]),
+    ...sharers,
+  ])]);
   const nameOf = (id: string) => names.get(id) ?? 'Member';
+  // E2E (h): the asker is "You" everywhere in the context, never their own name.
+  const who = (id: string) => (id === ctx.userId ? 'You' : flatCut(nameOf(id), MATCH_FIELD_MAX.name));
+  const at = (isoStr: string) => friendlyTime(isoStr, body.tz, now, lang);
+  const group = groupView(extras, positions.filter((p) => memberSet.has(p.userId)), ctx.userId, ok, nameOf, now.getTime(), body.anchor ?? null);
   const { questions, keyOf } = matchLegend(questionRows);
   const compact = people.map((p) => compactPerson(nameOf(p.userId), p, keyOf));
   if (compact.some((c) => c.legacy)) questions.push(...LEGACY_QUESTIONS.map(({ key, kind, prompt }) => ({ key, kind, prompt })));
@@ -1056,7 +1320,15 @@ async function ask(ctx: Ctx, body: { question: string; history: AskTurn[]; me: A
       history: body.history,
       questions,
       people: compact.map(({ name, answers }) => ({ name, answers })),
-      lines: msgs.map((m) => ({ sender: flatCut(nameOf(m.senderId!), MATCH_FIELD_MAX.name), text: cut(m.body!, ASK_LINE_MAX) })),
+      lines: msgs.map((m) => ({ at: at(m.createdAt), sender: who(m.senderId!), text: cut(m.body!, ASK_LINE_MAX) })),
+      events: history.lines.map((m) => ({
+        at: at(m.createdAt),
+        who: who(m.senderId!),
+        kind: m.kind,
+        text: eventText(m.body!, names.get(m.senderId!)),
+      })),
+      emergencies: history.alerts.map((e) => ({ who: who(e.userId), at: at(e.createdAt), resolved: e.resolved, seenBy: e.ackedBy.map(who) })),
+      group,
       question: body.question,
     }),
     schema: ASK_SCHEMA,
@@ -1077,6 +1349,133 @@ async function ask(ctx: Ctx, body: { question: string; history: AskTurn[]; me: A
     return AI_FAILED;
   }
   return { status: 200, body: { answer: cut(answer, ASK_ANSWER_MAX), usage: r.usage } };
+}
+
+// ---- E2E fixes (a), (b): room events and the group view for ask ----
+
+function haversineM(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
+  const rad = (d: number) => (d * Math.PI) / 180;
+  const h = Math.sin(rad(b.lat - a.lat) / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(rad(b.lng - a.lng) / 2) ** 2;
+  return 2 * 6_371_000 * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+/** Metres along the route to the point's projection on the nearest segment (the client's progressAlongRoute). */
+export function progressAlongRoute(p: { lat: number; lng: number }, route: { lat: number; lng: number }[]): number {
+  const rad = Math.PI / 180;
+  const kx = Math.cos(p.lat * rad) * rad * 6_371_000;
+  const ky = rad * 6_371_000;
+  const xy = (q: { lat: number; lng: number }) => ({ x: q.lng * kx, y: q.lat * ky });
+  const q = xy(p);
+  let best = { dist: Infinity, progress: 0 };
+  let along = 0;
+  for (let i = 1; i < route.length; i++) {
+    const a = xy(route[i - 1]);
+    const b = xy(route[i]);
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((q.x - a.x) * dx + (q.y - a.y) * dy) / len2)) : 0;
+    const dist = Math.hypot(q.x - (a.x + t * dx), q.y - (a.y + t * dy));
+    const seg = haversineM(route[i - 1], route[i]);
+    if (dist < best.dist) best = { dist, progress: along + t * seg };
+    along += seg;
+  }
+  return best.progress;
+}
+
+const round10 = (m: number) => Math.round(m / 10) * 10;
+
+/**
+ * E2E (b): the asker's group while an activity runs. Only members who share their location (opt-in), allow AI and
+ * have a position newer than POSITION_FRESH_MS. Never coordinates: progress (along the route, else from the place
+ * pin) and distances only. Null when no activity runs or the host does not allow location.
+ */
+export function groupView(
+  extras: RoomExtras,
+  positions: LivePosition[],
+  askerId: string,
+  allowed: (id: string) => boolean,
+  nameOf: (id: string) => string,
+  nowMs: number,
+  anchor: GeoPoint | null = null,
+): AskGroup | null {
+  if (extras.activityState !== 'active' || !extras.locationAllowed) return null;
+  const route = extras.route.filter((p) => Number.isFinite(p?.lat) && Number.isFinite(p?.lng));
+  const seen = new Set<string>();
+  const live = positions.filter((p) => {
+    const age = nowMs - Date.parse(p.updatedAt);
+    const fresh = p.sharing && allowed(p.userId) && !seen.has(p.userId) && Number.isFinite(p.lat) && Number.isFinite(p.lng) && age >= -60_000 && age <= POSITION_FRESH_MS;
+    if (fresh) seen.add(p.userId);
+    return fresh;
+  });
+  // Same order as the pace screen: route, else the place pin, else the asker's own start point.
+  const origin = extras.place ?? anchor;
+  const basis = route.length >= 2 ? 'route' : extras.place ? 'place' : anchor ? 'start' : 'none';
+  const progressOf = (p: LivePosition): number | null =>
+    route.length >= 2 ? progressAlongRoute(p, route) : origin ? haversineM(origin, p) : null;
+  const rows = live.map((p) => ({ p, progressM: progressOf(p) }));
+  const ranked = rows.filter((r) => r.progressM !== null) as { p: LivePosition; progressM: number }[];
+  const frontM = ranked.length ? Math.max(...ranked.map((r) => r.progressM)) : null;
+  // Unknown (left out of the XML) without a front; never a false "not in the lead group".
+  const inLead = (r: { progressM: number | null }) => (frontM === null || r.progressM === null ? undefined : r.progressM >= frontM - LEAD_GROUP_SPAN_M);
+  const moving = (p: LivePosition) => (p.speedMps === null || !Number.isFinite(p.speedMps) ? undefined : p.speedMps >= MOVING_MPS);
+  const seenS = (p: LivePosition) => Math.max(0, Math.round((nowMs - Date.parse(p.updatedAt)) / 1000));
+  const me = rows.find((r) => r.p.userId === askerId) ?? null;
+  const leadRows = ranked.filter(inLead).sort((a, b) => b.progressM - a.progressM);
+  const others = rows
+    .filter((r) => r.p.userId !== askerId)
+    .sort((a, b) => (b.progressM ?? -1) - (a.progressM ?? -1) || (a.p.userId < b.p.userId ? -1 : 1))
+    .slice(0, ASK_GROUP_MAX);
+  return {
+    sharing: live.length,
+    basis,
+    lead: frontM === null ? null : {
+      names: leadRows.map((r) => (r.p.userId === askerId ? 'You' : flatCut(nameOf(r.p.userId), MATCH_FIELD_MAX.name))),
+      frontM: round10(frontM),
+      rearM: round10(Math.min(...leadRows.map((r) => r.progressM))),
+    },
+    you: me && {
+      progressM: me.progressM === null ? null : round10(me.progressM),
+      inLead: inLead(me),
+      gapToLeadM: me.progressM === null || frontM === null ? null : round10(Math.max(0, frontM - me.progressM)),
+      moving: moving(me.p),
+      seenSAgo: seenS(me.p),
+    },
+    members: others.map((r) => ({
+      name: flatCut(nameOf(r.p.userId), MATCH_FIELD_MAX.name),
+      progressM: r.progressM === null ? null : round10(r.progressM),
+      inLead: inLead(r),
+      fromYouM: me ? round10(haversineM(me.p, r.p)) : null,
+      moving: moving(r.p),
+      seenSAgo: seenS(r.p),
+    })),
+  };
+}
+
+/** The sender's name at the start of a status/emergency body ("Mina: Lost", "Mina needs help ...") is dropped. */
+export function eventText(body: string, name: string | undefined): string {
+  const flat = body.replace(/\s+/g, ' ').trim();
+  const rest = name && flat.startsWith(name) ? flat.slice(name.length).replace(/^:\s*/, '').trim() : flat;
+  return cut(rest || flat, ASK_EVENT_LINE_MAX);
+}
+
+/**
+ * E2E (a): consenting members' status/Emergency lines (oldest first) and their Emergencies with who saw them
+ * (consenting ackers only) and whether they were resolved (a later status line from the same member).
+ */
+export function roomHistory(events: Msg[], emergencies: Emergency[], allowed: (id: string | null) => boolean) {
+  const lines = events.filter((m) => allowed(m.senderId) && m.body?.trim()).slice(0, ASK_EVENT_LINES).reverse();
+  const alerts = emergencies
+    .filter((e) => allowed(e.userId))
+    .slice(0, ASK_EMERGENCIES)
+    .reverse()
+    .map((e) => ({
+      userId: e.userId,
+      createdAt: e.createdAt,
+      ackedBy: [...new Set(e.ackedBy)].filter((u) => u !== e.userId && allowed(u)),
+      resolved: events.some((m) => m.kind === 'status' && m.senderId === e.userId && m.createdAt > e.createdAt),
+    }));
+  return { lines, alerts };
 }
 
 /** Route length in km (haversine), 1 decimal; null with fewer than 2 valid points. */

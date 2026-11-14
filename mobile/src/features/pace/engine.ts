@@ -114,6 +114,11 @@ export function paceSnapshot(room: { id: string; activity_state: string; activit
   return currentPaceSnapshot({ activityRunning: room.activity_state === 'active', tracker, nowMs });
 }
 
+/** My own start point in this room's current activity (engine anchor when there is no place pin); null when unmeasured. */
+export function paceStartPoint(room: { id: string; activity_seq: number }): Point | null {
+  return runs.get(runKey(room.id, room.activity_seq))?.tracker.firstPoint ?? null;
+}
+
 /** My in-memory sessions in this room (any activity), for a recap built before or while they are saved. */
 export function liveSessions(roomId: string): PaceSession[] {
   const out: PaceSession[] = [];
@@ -140,6 +145,7 @@ function cueText(cue: ChosenCue): string {
     case 'km':
       return t.cueKm(cue.km, cue.pace, cue.target);
     case 'gap':
+      if (cue.mode === 'pickUp') return t.cueGapPickUp(cue.gapM);
       return cue.pace == null ? t.cueGapKeep(cue.gapM) : t.cueGap(cue.gapM, cue.pace);
     case 'slow':
       return t.cueSlow(cue.pace, cue.target);
@@ -179,7 +185,7 @@ export function feedFixes(key: string, batch: PaceFix[], ctx: FeedContext) {
     lastSplitS: tracker.splits.length ? tracker.splits[tracker.splits.length - 1] : null,
     recentSecPerKm: recent,
     targetSecPerKm: ctx.targetSecPerKm,
-    gap: gapCue(ctx.userId, runners, ctx.targetSecPerKm),
+    gap: gapCue(ctx.userId, runners, ctx.targetSecPerKm, recent),
     stopped: run.stationary.openSinceMs != null || standingStill(fixes, tracker.seenAtMs),
   });
   run = { ...run, cues: chosen.schedule };

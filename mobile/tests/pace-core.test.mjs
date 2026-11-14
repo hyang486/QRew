@@ -7,6 +7,7 @@ import {
   addFix,
   formatPace,
   gapCue,
+  spokenCue,
   leadGroup,
   median,
   newStationaryState,
@@ -176,13 +177,43 @@ test('gap cue: over 150 m behind, the pace that closes the gap in 3 minutes at t
   assert.equal(gapCue('x', runners), null);
 });
 
-test('gap cue without group speeds uses the gap alone', () => {
-  const cue = gapCue('me', [
-    { userId: 'a', progressM: 1000, speedMps: null },
-    { userId: 'me', progressM: 640, speedMps: null },
-  ]);
-  // 360 m / 180 s = 2 m/s = 500 s/km.
-  assert.ok(near(cue.secPerKm, 500, 0.5));
+test('gap cue with no group speed builds on the target or my recent pace, never on the gap alone', () => {
+  // qa: 161 m behind, no group speed gave 1000 / (161 / 180) = 18:38 per km, slower than everyone.
+  const runners = [
+    { userId: 'a', progressM: 1161, speedMps: null },
+    { userId: 'me', progressM: 1000, speedMps: null },
+  ];
+  // Target 6:00 (2.78 m/s) + 161 / 180 = 3.67 m/s = 4:32 per km.
+  const target = gapCue('me', runners, 360);
+  assert.equal(target.mode, 'pace');
+  assert.equal(target.pace, '4:32');
+  // No target, my recent 5:00 (3.33 m/s) + 0.89 = 4.23 m/s = 3:56 per km.
+  assert.equal(gapCue('me', runners, null, 300).pace, '3:57');
+  // Both: the faster one is the base, so the answer is never slower than my pace.
+  assert.equal(gapCue('me', runners, 330, 300).pace, '3:57');
+  // Neither: no number.
+  const none = gapCue('me', runners);
+  assert.deepEqual(none, { gapM: 161, secPerKm: null, pace: null, mode: 'pickUp' });
+  assert.equal(spokenCue({ kind: 'gap', ...none }), 'Lead group 161 meters ahead, pick up the pace.');
+});
+
+test('gap cue with a known group speed: group speed + gap / 3 minutes, never slower than me', () => {
+  const runners = [
+    { userId: 'a', progressM: 1161, speedMps: 2.5 },
+    { userId: 'me', progressM: 1000, speedMps: null },
+  ];
+  // 2.5 + 0.894 = 3.39 m/s = 4:55 per km; a target does not change it (only the 70% cap).
+  assert.equal(gapCue('me', runners).pace, '4:55');
+  assert.equal(gapCue('me', runners, 300).pace, '4:55');
+  // Already faster (4:00 = 4.17 m/s): never ask for slower than my pace.
+  const fast = gapCue('me', runners, null, 240);
+  assert.ok(fast.secPerKm <= 240);
+  for (const t of [null, 300, 600]) for (const mine of [null, 240, 400, 900]) {
+    const c = gapCue('me', runners, t, mine);
+    if (c.secPerKm == null) continue;
+    assert.ok(c.secPerKm < 400, 'faster than the group (400 s/km)');
+    if (mine != null) assert.ok(c.secPerKm <= mine, 'not slower than me');
+  }
 });
 
 // --- stationary -----------------------------------------------------------------------------------------------

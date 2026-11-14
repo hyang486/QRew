@@ -11,12 +11,11 @@ import { en } from '@/i18n/en';
 
 import { DisclosureSheet } from './disclosure-sheet';
 import { probeQrewing, useQrewingRoom } from './qrewing-api';
+import { QREWING_FAB_MARGIN, QREWING_FAB_SIZE } from './qrewing-fab-size';
 
 const s = en.qrewing.ask;
 const ART = require('../../../assets/images/icon.png');
-export const QREWING_FAB_SIZE = 56;
-/** Bottom padding for a scroll area under the button, so its last row can scroll clear of it. */
-export const QREWING_FAB_CLEARANCE = QREWING_FAB_SIZE + 24;
+export { QREWING_FAB_CLEARANCE, QREWING_FAB_MARGIN, QREWING_FAB_SIZE } from './qrewing-fab-size';
 
 /** The room's Qrewing switch plus a probe ok, and my consent. `available` is false until both answer. */
 export function useQrewingAsk(roomId: string) {
@@ -63,7 +62,7 @@ export function QrewingFab({ roomId, bottom = 0, safeArea = false }: { roomId: s
         hitSlop={6}
         style={({ pressed }) => [
           styles.fab,
-          { bottom: bottom + (safeArea ? Math.max(insets.bottom, 12) : 0) + 12, right: insets.right + 16 },
+          { bottom: bottom + (safeArea ? Math.max(insets.bottom, 12) : 0) + QREWING_FAB_MARGIN, right: insets.right + 16 },
           pressed && styles.pressed,
         ]}
       >

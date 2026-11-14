@@ -171,3 +171,45 @@ test('two sends then an end inside the debounce: grace keeps messages 2 (bumpMes
   assert.equal(bumpMessages({ ...EMPTY_MY_PART }).messages, null);
   assert.equal(bumpMessages(null), null);
 });
+
+// UI v2 bug 6 (2026-11-13): a diary in the calendar but "No recap was saved" on the ended room.
+test('the recap is written before my part is read, so a failed or hung read still leaves it saved', async () => {
+  const { saveRecapInTwoSteps } = await import('../src/features/recap/recap-plan.ts');
+  const server = { title: 'T', summary: 'S', highlights: [], generatedAt: 'g' };
+  const open = { messages: 3, mediaShared: null, photosOfMe: null, arrivedAt: null, pace: null };
+  const writes = [];
+  const d = {
+    savedMe: async () => null,
+    openMe: async () => open,
+    write: async (s) => void writes.push(s),
+    now: () => 'now',
+  };
+  const failed = await saveRecapInTwoSteps(server, { ...d, fresh: async () => { throw new Error('offline'); } });
+  assert.equal(writes.length, 1);
+  assert.deepEqual(failed.me, open);
+  assert.deepEqual(writes[0].server, server);
+
+  writes.length = 0;
+  let release;
+  const p = saveRecapInTwoSteps(server, { ...d, fresh: () => new Promise((r) => (release = r)) });
+  await new Promise((r) => setTimeout(r, 0));
+  assert.equal(writes.length, 1, 'saved while the read still hangs');
+  release({ ...open, messages: null, mediaShared: 2 });
+  const saved = await p;
+  assert.equal(writes.length, 2);
+  assert.equal(saved.me.messages, 3);
+  assert.equal(saved.me.mediaShared, 2);
+});
+
+test('a failed write never loses the returned recap', async () => {
+  const { saveRecapInTwoSteps } = await import('../src/features/recap/recap-plan.ts');
+  const server = { title: 'T', summary: 'S', highlights: [], generatedAt: 'g' };
+  const me = { messages: 1, mediaShared: 0, photosOfMe: null, arrivedAt: null, pace: null };
+  const saved = await saveRecapInTwoSteps(server, {
+    savedMe: async () => { throw new Error('x'); },
+    openMe: async () => null,
+    fresh: async () => me,
+    write: async () => { throw new Error('disk'); },
+  });
+  assert.deepEqual(saved.me, me);
+});

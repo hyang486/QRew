@@ -9,7 +9,9 @@ import {
   faceJobCounts,
   faceRefResize,
   faceViewState,
+  hasNewReadyPhoto,
   photosOfMe,
+  readyPhotoIds,
   shouldRunMatch,
 } from '../src/lib/face-plan.ts';
 
@@ -134,4 +136,20 @@ test('a cached disabled run shows the disabled notice once enrolled, even with n
   cache.set('r1', { kind: 'disabled' });
   assert.equal(faceViewState({ enrolled: true, run: cache.get('r1'), pending: 0 }), 'disabled');
   assert.equal(faceViewState({ enrolled: false, run: cache.get('r1'), pending: 0 }), 'consent');
+});
+
+test('readyPhotoIds: only ready photos, order-independent key', () => {
+  const a = readyPhotoIds([photo('b'), photo('a'), photo('v', { kind: 'video' }), photo('p', { status: 'pending' })]);
+  assert.equal(a, readyPhotoIds([photo('a'), photo('b')]));
+  assert.equal(readyPhotoIds([]), '');
+});
+
+test('hasNewReadyPhoto: a photo that was not in the previous set (new upload or realtime insert)', () => {
+  assert.equal(hasNewReadyPhoto('a,b', 'a,b,c'), true);
+  assert.equal(hasNewReadyPhoto('', 'a'), true);
+  // Deletions and an unchanged list need no face reload.
+  assert.equal(hasNewReadyPhoto('a,b', 'a'), false);
+  assert.equal(hasNewReadyPhoto('a,b', 'a,b'), false);
+  // No baseline yet (first render): the focus load covers it.
+  assert.equal(hasNewReadyPhoto(null, 'a'), false);
 });

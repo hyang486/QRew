@@ -1,7 +1,9 @@
-import { Alert, StyleSheet, Text, View } from 'react-native';
+import { Alert, StyleSheet, Switch, Text, View } from 'react-native';
 
 import { Button, colors, Hint, Screen } from '@/components/ui';
 import { en } from '@/i18n/en';
+import { setPlusPreview, usePlusPreview } from '@/features/calendar/calendar-store';
+import { useAuth } from '@/lib/auth';
 
 /**
  * Plus plan preview (APP_CONCEPT_KO: plan and benefit demo only).
@@ -10,6 +12,8 @@ import { en } from '@/i18n/en';
  */
 export default function PlanPreview() {
   const t = en.planPreview;
+  const uid = useAuth().session?.user.id;
+  const on = usePlusPreview(uid);
   return (
     <Screen>
       <View style={styles.badge} accessibilityRole="text">
@@ -38,11 +42,20 @@ export default function PlanPreview() {
       <Hint>{t.tbdNote}</Hint>
 
       <Button title={t.cta} onPress={() => Alert.alert(t.ctaAlertTitle, t.ctaAlertBody)} />
+      {uid ? (
+        <View style={styles.previewRow}>
+          <Text style={styles.previewLabel}>{t.tryPreview}</Text>
+          <Switch value={!!on} onValueChange={(v) => void setPlusPreview(uid, v)} accessibilityLabel={t.tryPreview} />
+        </View>
+      ) : null}
+      <Hint>{t.tryPreviewHint}</Hint>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
+  previewRow: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 44 },
+  previewLabel: { flex: 1, fontSize: 16, color: colors.label },
   badge: {
     alignSelf: 'flex-start',
     backgroundColor: colors.warning,

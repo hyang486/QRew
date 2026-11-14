@@ -16,10 +16,9 @@ import {
   pickBanner,
   staysVisible,
 } from './event-plan';
+import { createPendingRechecker } from './pending-recheck';
 import { triageMessages } from './qrewing-api';
 import type { MessageTriageRow, QrewingError } from './types';
-
-const PENDING_RECHECK_MS = 3_000;
 
 export type { ImportantBanner };
 
@@ -83,8 +82,16 @@ export function useSmallTalk({
   }, []);
 
   const batcher = useRef<ReturnType<typeof createTriageBatcher> | null>(null);
+  const rechecker = useRef<ReturnType<typeof createPendingRechecker<Flag>> | null>(null);
+  // Rechecks run only while mute is on.
+  useEffect(() => {
+    if (session === 'off') rechecker.current?.clear();
+  }, [session]);
   useEffect(() => {
     let alive = true;
+    // Another member's call is computing these: re-read the shared rows with backoff until done or skipped.
+    const recheck = createPendingRechecker<Flag>({ read: readTriage, apply: (rows) => alive && applyFlags(rows) });
+    rechecker.current = recheck;
     const b = createTriageBatcher({
       flush: async (ids) => {
         const res = await triageMessages(roomId, ids);
@@ -96,20 +103,15 @@ export function useSmallTalk({
         }
         applyFlags(res.map((r) => ({ id: r.messageId, important: r.important, reason: r.reason, state: r.state })));
         const pending = res.filter((r) => r.state === 'pending').map((r) => r.messageId);
-        if (pending.length === 0) return;
-        // Another member's call is computing these; read the shared rows once more after 3 s.
-        setTimeout(() => {
-          if (!alive) return;
-          readTriage(pending)
-            .then((rows) => alive && applyFlags(rows))
-            .catch(() => {});
-        }, PENDING_RECHECK_MS);
+        if (pending.length > 0) recheck.add(pending);
       },
     });
     batcher.current = b;
     return () => {
       alive = false;
       b.cancel();
+      recheck.cancel();
+      rechecker.current = null;
       batcher.current = null;
     };
   }, [roomId, applyFlags]);

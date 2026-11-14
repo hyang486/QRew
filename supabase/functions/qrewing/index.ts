@@ -1,5 +1,6 @@
 // qrewing Edge Function (contract: planning/QREWING_AI_SPEC_EN.md sections 2 and 7.2). Deployed with verify_jwt=false.
-// verify_jwt=false with the in-function JWT check, like face-match. Actions: probe, triage, recap, match.
+// verify_jwt=false with the in-function JWT check, like face-match. Actions: probe, triage, recap (+diary), match, ask,
+// calendar_add (no room: auth only, before the room gates).
 // Secret ANTHROPIC_API_KEY is set by the human; it is never logged or returned. Without it every call except an
 // unscoped probe after auth returns 503 ai_not_configured before any DB write, so deploying makes no AI calls.
 // SUPABASE_URL, SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY are provided by the platform.
@@ -424,7 +425,7 @@ function createStore(admin: any): QrewingStore {
     async roomExtras(roomId) {
       // Both reads at once; must() in the old order, so the same error is logged and thrown.
       const [roomRes, labelRes] = await Promise.all([
-        admin.from('rooms').select('activity_state, route').eq('id', roomId).maybeSingle(),
+        admin.from('rooms').select('activity_state, route, location_allowed, place_lat, place_lng').eq('id', roomId).maybeSingle(),
         admin.from('status_definitions').select('label').eq('room_id', roomId).order('sort'),
       ]);
       const r = must(roomRes, 'room_extras');
@@ -433,7 +434,47 @@ function createStore(admin: any): QrewingStore {
         activityState: r?.activity_state ?? 'idle',
         route: Array.isArray(r?.route) ? r.route : [],
         statusLabels: (labels ?? []).map((x: { label: string }) => x.label),
+        locationAllowed: r?.location_allowed === true,
+        place: typeof r?.place_lat === 'number' && typeof r?.place_lng === 'number' ? { lat: r.place_lat, lng: r.place_lng } : null,
       };
+    },
+    async roomEvents(roomId, limit) {
+      const rows = must(
+        await admin.from('messages').select(MSG_COLS).eq('room_id', roomId).in('kind', ['status', 'emergency'])
+          .order('created_at', { ascending: false }).limit(limit),
+        'messages_events',
+      );
+      return (rows ?? []).map(toMsg);
+    },
+    async emergencies(roomId, limit) {
+      const rows = must(
+        await admin.from('emergency_events').select('id, user_id, created_at, emergency_acks(user_id)').eq('room_id', roomId)
+          .order('created_at', { ascending: false }).limit(limit),
+        'emergencies',
+      );
+      return (rows ?? []).map((r: { id: string; user_id: string; created_at: string; emergency_acks: { user_id: string }[] | null }) => ({
+        id: r.id,
+        userId: r.user_id,
+        createdAt: r.created_at,
+        ackedBy: (r.emergency_acks ?? []).map((a) => a.user_id),
+      }));
+    },
+    async livePositions(roomId) {
+      const [posRes, memRes] = await Promise.all([
+        admin.from('live_presence').select('user_id, lat, lng, speed_mps, updated_at').eq('room_id', roomId),
+        admin.from('room_members').select('user_id, share_location').eq('room_id', roomId),
+      ]);
+      const pos = must(posRes, 'live_presence');
+      const mem = must(memRes, 'share_location');
+      const sharing = new Set((mem ?? []).filter((m: { share_location: boolean }) => m.share_location === true).map((m: { user_id: string }) => m.user_id));
+      return (pos ?? []).map((p: { user_id: string; lat: number; lng: number; speed_mps: number | null; updated_at: string }) => ({
+        userId: p.user_id,
+        lat: p.lat,
+        lng: p.lng,
+        speedMps: p.speed_mps,
+        updatedAt: p.updated_at,
+        sharing: sharing.has(p.user_id),
+      }));
     },
   };
 }

@@ -74,7 +74,22 @@ function subscribeSharing(listener: () => void) {
   };
 }
 
+/**
+ * s11: MY first successfully reported point per room in this app run (the ask anchor's last fallback). Memory only,
+ * written only by this device's reporter; dropped when the room's opt-in goes off, on reset and on SIGNED_OUT.
+ */
+const firstShared = new Map<string, { latitude: number; longitude: number }>();
+
+export function myFirstSharedPoint(roomId: string): { latitude: number; longitude: number } | null {
+  return firstShared.get(roomId) ?? null;
+}
+
+supabase.auth.onAuthStateChange((event) => {
+  if (event === 'SIGNED_OUT') firstShared.clear();
+});
+
 function setConsent(roomId: string, on: boolean) {
+  if (!on) firstShared.delete(roomId);
   if (sharing.rooms.has(roomId) === on) return;
   bumpGen(roomId);
   const rooms = new Set(sharing.rooms);
@@ -98,6 +113,7 @@ export function dropConsent(roomId: string) {
 
 function clearConsent() {
   globalGen += 1;
+  firstShared.clear();
   if (sharing.rooms.size > 0) emitSharing({ ...sharing, rooms: new Set() });
 }
 
@@ -108,6 +124,7 @@ function clearConsent() {
  */
 export function resetLocalLocation() {
   globalGen += 1;
+  firstShared.clear();
   pending.clear();
   emitSharing({ rooms: new Set(), states: new Map() });
 }
@@ -443,6 +460,7 @@ export function useLocationReporter({
           callbacks.current.onRefused();
           return;
         }
+        if (!firstShared.has(roomId)) firstShared.set(roomId, { latitude: fix.latitude, longitude: fix.longitude });
         lastSent = { latitude: fix.latitude, longitude: fix.longitude, atMs: Date.now() };
         lastSentReadingMs = fix.timestampMs;
         setState('sharing');

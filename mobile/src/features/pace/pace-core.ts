@@ -410,31 +410,47 @@ export function leadGroup(runners: Runner[]): LeadGroup | null {
   };
 }
 
-/** pace null: the catch-up pace is unrealistic (CATCH_UP_LIMIT), so the cue says "keep your pace" instead. */
-export type GapCue = { gapM: number; secPerKm: number; pace: string | null };
+/**
+ * mode 'pace': run `pace` to catch up. 'tooFar': the catch-up pace is unrealistic (CATCH_UP_LIMIT), so the cue
+ * says "keep your pace". 'pickUp': no speed to build on (no group speed, target or recent pace of mine), so no number.
+ */
+export type GapCue = { gapM: number; secPerKm: number | null; pace: string | null; mode: 'pace' | 'tooFar' | 'pickUp' };
 
 /** A catch-up pace faster than this share of the target time per km is not asked for. */
 export const CATCH_UP_LIMIT = 0.7;
 /** With no target: no catch-up pace faster than 3:00 per km. */
 export const CATCH_UP_FASTEST_SEC_PER_KM = 180;
 
+const speedOf = (secPerKm: number | null) => (secPerKm != null && Number.isFinite(secPerKm) && secPerKm > 0 ? 1000 / secPerKm : null);
+
 /**
- * More than BEHIND_GAP_M behind the lead group's last member: the pace that closes the gap in CATCH_UP_S at the
- * group's average speed (the gap alone when no group speed is known). A pace faster than CATCH_UP_LIMIT × target
- * (CATCH_UP_FASTEST_SEC_PER_KM with no target) comes back with pace null ("too far, keep your pace").
+ * More than BEHIND_GAP_M behind the lead group's last member: the pace that closes the gap in CATCH_UP_S. It builds
+ * on the group's average speed; with none known, on the faster of the room's target pace and my recent pace
+ * (gap / CATCH_UP_S alone only closes the gap if the group stops: qa got "Run 18:38 per km"). With none of them the
+ * cue has no number ('pickUp'). Never slower than my recent pace or the group's speed. A pace faster than
+ * CATCH_UP_LIMIT × target (CATCH_UP_FASTEST_SEC_PER_KM with no target) comes back as 'tooFar' ("keep your pace").
  */
-export function gapCue(myId: string, runners: Runner[], targetSecPerKm: number | null = null): GapCue | null {
+export function gapCue(
+  myId: string,
+  runners: Runner[],
+  targetSecPerKm: number | null = null,
+  mySecPerKm: number | null = null,
+): GapCue | null {
   const me = runners.find((r) => r.userId === myId);
   const group = leadGroup(runners);
   if (!me || !group || group.members.includes(myId)) return null;
   const gapM = Math.round(group.rearM - me.progressM);
   if (gapM <= BEHIND_GAP_M) return null;
-  const needed = (group.speedMps ?? 0) + gapM / CATCH_UP_S;
+  const mySpeed = speedOf(mySecPerKm);
+  const fallback = [speedOf(targetSecPerKm), mySpeed].filter((v): v is number => v != null);
+  const base = group.speedMps ?? (fallback.length ? Math.max(...fallback) : null);
+  if (base == null) return { gapM, secPerKm: null, pace: null, mode: 'pickUp' };
+  const needed = Math.max(base + gapM / CATCH_UP_S, mySpeed ?? 0, group.speedMps ?? 0);
   const secPerKm = 1000 / needed;
   const fastest = targetSecPerKm != null && targetSecPerKm > 0 ? CATCH_UP_LIMIT * targetSecPerKm : CATCH_UP_FASTEST_SEC_PER_KM;
-  if (secPerKm < fastest) return { gapM, secPerKm, pace: null };
+  if (secPerKm < fastest) return { gapM, secPerKm, pace: null, mode: 'tooFar' };
   const pace = formatPace(secPerKm);
-  return pace ? { gapM, secPerKm, pace } : null;
+  return pace ? { gapM, secPerKm, pace, mode: 'pace' } : null;
 }
 
 /** My fixes of this window decide whether I am standing still for cues. */
@@ -700,6 +716,7 @@ const spokenPace = (text: string | null) => {
 /** The words spoken for a cue; same content as the banner (strings.ts cue*), said as words. */
 export function spokenCue(cue: ChosenCue): string {
   if (cue.kind === 'gap') {
+    if (cue.mode === 'pickUp') return `Lead group ${spokenDistance(cue.gapM)} ahead, pick up the pace.`;
     if (cue.pace == null)
       return `Lead group ${spokenDistance(cue.gapM)} ahead. Too far to catch in ${spokenDuration(CATCH_UP_S)}: keep your pace.`;
     const run = spokenPace(cue.pace) ?? cue.pace;
@@ -756,11 +773,15 @@ export function currentPaceSnapshot(input: {
   return { elapsedSec, distanceM, paceSecPerKm, activity: movingNow(t, input.nowMs) ? 'moving' : 'stopped' };
 }
 
-/** The newest trail point added moving time over the one before it, and it is at most SNAPSHOT_MOVING_FRESH_MS old. */
+/**
+ * Moving time grew within the last SNAPSHOT_MOVING_FRESH_MS. Not just the newest step: with frequent fixes most land
+ * inside the noise circle and add no time, so a steady run would read "stopped" between moves (E2E finding b).
+ */
 function movingNow(t: Tracker, nowMs: number): boolean {
-  const n = t.trail.length;
-  if (n < 2) return false;
-  const last = t.trail[n - 1];
-  const prev = t.trail[n - 2];
-  return last.movingMs > prev.movingMs && nowMs - last.atMs <= SNAPSHOT_MOVING_FRESH_MS;
+  for (let i = t.trail.length - 1; i > 0; i--) {
+    const p = t.trail[i];
+    if (nowMs - p.atMs > SNAPSHOT_MOVING_FRESH_MS) return false;
+    if (p.movingMs > t.trail[i - 1].movingMs) return p.atMs <= nowMs;
+  }
+  return false;
 }

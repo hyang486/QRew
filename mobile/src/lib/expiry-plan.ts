@@ -6,14 +6,18 @@ export const REMINDER_ID_PREFIX = 'expiry-';
 
 /** Running-crew #9 (human decision 2026-11-07): rooms shorter than 24 h show the in-room banner only in the last hour. */
 export const SHORT_ROOM_BANNER_MS = 60 * 60 * 1000;
-// A "1 day" room is created with expires_at = client now + 24 h, and created_at is the later server time, so its
-// length can come out a little under 24 h. Rooms within this margin of 24 h still count as 24 h rooms.
+// A "1 day" room is created with expires_at = client now + 24 h; created_at (server time) and clock skew make its
+// length land near 24 h on either side. Rooms up to this margin over 24 h count as 1-day rooms.
 const SHORT_ROOM_MARGIN_MS = 10 * 60 * 1000;
 
-/** How long before the end the in-room "Room ends soon" banner shows: 1 h for rooms under 24 h, else 24 h. */
+/**
+ * How long before the end the in-room "Room ends soon" banner (and the reminder) shows: 1 h for rooms of 1 day
+ * or less, else 24 h. UI v2 bug 1 (qa, 2026-11-13): a 24 h window on a 1-day room covers its whole life, so the
+ * banner and the reminder ("disappears in 23h 55m") appeared right after creating it.
+ */
 export function endsSoonWindowMs(createdAt: string, expiresAt: string) {
   const length = new Date(expiresAt).getTime() - new Date(createdAt).getTime();
-  if (Number.isFinite(length) && length < REMINDER_WINDOW_MS - SHORT_ROOM_MARGIN_MS) return SHORT_ROOM_BANNER_MS;
+  if (Number.isFinite(length) && length < REMINDER_WINDOW_MS + SHORT_ROOM_MARGIN_MS) return SHORT_ROOM_BANNER_MS;
   return REMINDER_WINDOW_MS;
 }
 

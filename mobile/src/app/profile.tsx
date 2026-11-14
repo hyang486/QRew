@@ -31,6 +31,18 @@ export default function Profile() {
     }
   }
 
+  // UI audit (3): native confirm, default Cancel; the guest copy says the guest account cannot come back.
+  function confirmLogOut() {
+    Alert.alert(
+      isGuest ? en.profile.guestSignOutConfirmTitle : en.profile.signOutConfirmTitle,
+      isGuest ? en.profile.guestSignOutConfirmBody : en.profile.signOutConfirmBody,
+      [
+        { text: en.profile.deleteCancel, style: 'cancel' },
+        { text: en.profile.signOutConfirmAction, style: 'destructive', onPress: logOut },
+      ],
+    );
+  }
+
   async function runDelete() {
     setBusy('delete');
     setError(null);
@@ -93,7 +105,7 @@ export default function Profile() {
           icon="rectangle.portrait.and.arrow.right"
           title={en.profile.signOut}
           subtitle={isGuest ? en.profile.guestSignOutWarning : undefined}
-          onPress={logOut}
+          onPress={confirmLogOut}
           busy={busy === 'signout'}
         />
       </View>

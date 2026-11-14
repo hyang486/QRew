@@ -2,6 +2,7 @@
 // `qrewing.recap.v1.<roomId>`, so the Room ended screen can show it after the server deleted the room.
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import { saveRecapToCalendar, wantsDiary } from '@/features/calendar/calendar-store';
 import { requestRecap } from '@/features/event/qrewing-api';
 import { isOfflineError } from '@/features/event/qrewing-plan';
 import { getActivitySummary, paceRecapLine } from '@/features/pace/summary';
@@ -11,13 +12,14 @@ import { loadFaceData } from '@/lib/face';
 import { supabase } from '@/lib/supabase';
 
 import {
+  askDiaryOnce,
   EMPTY_MARK,
   END_RECAP_TIMEOUT_MS,
   bumpMessages,
   EMPTY_MY_PART,
   mergeMyPart,
   myPartAfterRoomCheck,
-  myPartForSave,
+  saveRecapInTwoSteps,
   type MyPart,
   parseMark,
   parseMyPart,
@@ -176,16 +178,33 @@ export async function saveMessageCountWhileOpen(roomId: string, userId: string):
   }
 }
 
-async function save(roomId: string, userId: string, server: ServerRecap): Promise<SavedRecap> {
-  const prev = await loadSavedRecap(roomId);
-  const me = myPartForSave(prev?.me, await loadOpenMyPart(roomId), await readMyPart(roomId, userId));
-  const saved: SavedRecap = { server, me, savedAt: new Date().toISOString() };
-  try {
-    await AsyncStorage.setItem(recapKey(roomId), JSON.stringify(saved));
-  } catch {
-    // Not saved on this device; the Room ended screen then says no recap was saved.
+const diaryInFlight = new Set<string>();
+
+async function save(
+  roomId: string,
+  userId: string,
+  server: ServerRecap,
+  opts?: { diaryAsked?: boolean },
+): Promise<SavedRecap> {
+  // s24: only fetchAndSaveRecap sent diary:true; every other path saved the recap without ever asking.
+  if (!opts?.diaryAsked) {
+    void askDiaryOnce(
+      roomId,
+      {
+        wants: () => wantsDiary(userId, roomId),
+        request: () => requestRecap(roomId, { diary: true }),
+        save: (r) => saveRecapToCalendar(userId, roomId, r),
+      },
+      diaryInFlight,
+    );
   }
-  return saved;
+  // Bug 6: written before the network reads of my part, then again with them.
+  return saveRecapInTwoSteps(server, {
+    savedMe: async () => (await loadSavedRecap(roomId))?.me,
+    openMe: () => loadOpenMyPart(roomId),
+    fresh: () => readMyPart(roomId, userId),
+    write: (saved) => AsyncStorage.setItem(recapKey(roomId), JSON.stringify(saved)),
+  });
 }
 
 /**
@@ -193,14 +212,17 @@ async function save(roomId: string, userId: string, server: ServerRecap): Promis
  * is left to the broadcast or the next read. Returns the saved recap, or null.
  */
 export async function fetchAndSaveRecap(roomId: string, userId: string, opts?: { refresh?: boolean }): Promise<SavedRecap | null> {
-  const res = await requestRecap(roomId, opts);
+  // Qrewing Calendar (Plus preview): ask for the emoji and diary once; they are kept only on this phone.
+  const diary = await wantsDiary(userId, roomId).catch(() => false);
+  const res = await requestRecap(roomId, { ...opts, diary });
   if ('error' in res || res.state !== 'done') return null;
-  return save(roomId, userId, {
-    title: res.title,
-    summary: res.summary,
-    highlights: res.highlights,
-    generatedAt: res.generatedAt,
-  });
+  if (diary && res.emoji) void saveRecapToCalendar(userId, roomId, { emoji: res.emoji, diary: res.diary });
+  return save(
+    roomId,
+    userId,
+    { title: res.title, summary: res.summary, highlights: res.highlights, generatedAt: res.generatedAt },
+    { diaryAsked: diary },
+  );
 }
 
 /** Trigger C: after a `room_recaps` notice, read the row through RLS and save it when done. */

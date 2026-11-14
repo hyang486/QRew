@@ -10,6 +10,8 @@ const KNOWN: readonly QrewingError[] = [
   'too_early',
   'not_consented',
   'ask_limit',
+  'unclear',
+  'rate_limited',
   'ai_failed',
   'network',
 ];

@@ -201,7 +201,7 @@ export default function GalleryScreen() {
       </View>
     ) : null;
   const scroll = (children: ReactNode) => (
-    <ScrollView contentInsetAdjustmentBehavior="never">
+    <ScrollView contentInsetAdjustmentBehavior="never" contentContainerStyle={{ paddingBottom: can.upload ? QREWING_FAB_CLEARANCE : 0 }}>
       {notices}
       {children}
     </ScrollView>
@@ -271,6 +271,7 @@ export default function GalleryScreen() {
               onRefreshMedia={media.reload}
               header={notices}
               readOnly={!can.upload}
+              bottomInset={can.upload ? QREWING_FAB_CLEARANCE : 0}
             />
           )
         ) : media.loading ? (

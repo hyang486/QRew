@@ -235,7 +235,8 @@ test('A′-2: missing or over-5MB detect copy falls back to the preview and logs
       log: (event, f) => lines.push(`${event} ${JSON.stringify(f)}`),
     });
     assert.equal(seen, 5);
-    assert.deepEqual(lines, [`detect_fallback {"job":"j1","reason":"${reason}"}`]);
+    assert.deepEqual(lines.filter((l) => !l.startsWith('face_compare ')), [`detect_fallback {"job":"j1","reason":"${reason}"}`]);
+    assert.equal(JSON.parse(lines.find((l) => l.startsWith('face_compare '))!.slice(13)).target, 'fallback');
   }
 });
 
@@ -247,7 +248,7 @@ test('A′-2: a failed delete is logged without path or error text and does not 
     log: (event, f) => lines.push(`${event} ${JSON.stringify(f)}`),
   });
   assert.equal(s.done, 1);
-  assert.deepEqual(lines, ['detect_delete_failed {"job":"j1"}']);
+  assert.deepEqual(lines.filter((l) => !l.startsWith('face_compare ')), ['detect_delete_failed {"job":"j1"}']);
 });
 
 test('A′-2: detectObjectPath and staleDetectObjects', () => {
@@ -322,7 +323,9 @@ test('Rekognition provider: request shape, response parsing, no secret in the re
     }) as unknown as typeof fetch,
   });
   const r = await provider.compare(bytes(20), bytes(30));
-  assert.deepEqual(r, { similarity: 91.5, targetHadFace: true });
+  assert.deepEqual({ similarity: r.similarity, targetHadFace: r.targetHadFace }, { similarity: 91.5, targetHadFace: true });
+  assert.equal(JSON.parse(seen[0].init.body as string).QualityFilter, 'AUTO');
+  assert.deepEqual(Object.keys(JSON.parse(seen[0].init.body as string)).sort(), ['QualityFilter', 'SimilarityThreshold', 'SourceImage', 'TargetImage']);
   assert.equal(seen[0].url, 'https://rekognition.us-west-2.amazonaws.com/');
   const headers = seen[0].init.headers as Record<string, string>;
   assert.equal(headers['x-amz-target'], 'RekognitionService.CompareFaces');
@@ -334,11 +337,80 @@ test('Rekognition provider: request shape, response parsing, no secret in the re
 test('Rekognition provider: empty matches / oversize / HTTP errors map to the right kinds', async () => {
   const mk = (status: number, body: unknown) =>
     createRekognitionProvider({ accessKeyId: 'a', secretAccessKey: 'b', region: 'us-west-2', similarityThreshold: 80, fetchImpl: (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch });
-  assert.deepEqual(await mk(200, { FaceMatches: [], UnmatchedFaces: [{}] }).compare(bytes(1), bytes(1)), { similarity: null, targetHadFace: true });
-  assert.deepEqual(await mk(200, { FaceMatches: [], UnmatchedFaces: [] }).compare(bytes(1), bytes(1)), { similarity: null, targetHadFace: false });
+  const core = ({ similarity, targetHadFace }: { similarity: number | null; targetHadFace: boolean }) => ({ similarity, targetHadFace });
+  assert.deepEqual(core(await mk(200, { FaceMatches: [], UnmatchedFaces: [{}] }).compare(bytes(1), bytes(1))), { similarity: null, targetHadFace: true });
+  assert.deepEqual(core(await mk(200, { FaceMatches: [], UnmatchedFaces: [] }).compare(bytes(1), bytes(1))), { similarity: null, targetHadFace: false });
   await assert.rejects(mk(200, {}).compare(bytes(1), bytes(5 * 1024 * 1024 + 1)), { kind: 'bad_image' });
   await assert.rejects(mk(400, { __type: 'ThrottlingException' }).compare(bytes(1), bytes(1)), { kind: 'throttled' });
   await assert.rejects(mk(403, { __type: 'AccessDeniedException' }).compare(bytes(1), bytes(1)), { kind: 'auth' });
   await assert.rejects(mk(500, {}).compare(bytes(1), bytes(1)), { kind: 'transient' });
   assert.equal(classifyAwsError(400, 'com.amazon#InvalidParameterException', 'There are no faces in the source image').kind, 'no_face_in_reference');
+});
+
+// Similarity-only logging (item 8) ---------------------------------------------------------------------------
+const LOG_KEYS = ['job', 'room', 'media', 'target', 'quality_filter', 'provider_floor', 'threshold', 'best_similarity', 'matched', 'target_had_face', 'outcome', 'faces'].sort();
+
+test('Rekognition detail: box size only (no position, landmarks or face ids), floor and filter recorded', async () => {
+  const body = {
+    SourceImageFace: { BoundingBox: { Width: 0.3, Height: 0.4, Left: 0.1, Top: 0.2 }, Confidence: 99 },
+    FaceMatches: [{ Similarity: 84.27, Face: { BoundingBox: { Width: 0.08612, Height: 0.1013, Left: 0.41, Top: 0.12 }, Confidence: 99.9, Landmarks: [{ X: 0.4, Y: 0.1 }], FaceId: 'leak-id' } }],
+    UnmatchedFaces: [{ BoundingBox: { Width: 0.05, Height: 0.06, Left: 0.7, Top: 0.3 }, Landmarks: [{ X: 0.7 }] }, {}],
+  };
+  const provider = createRekognitionProvider({ accessKeyId: 'a', secretAccessKey: 'b', region: 'us-east-2', similarityThreshold: 80, fetchImpl: (async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch });
+  const r = await provider.compare(bytes(1), bytes(1));
+  assert.equal(r.similarity, 84.27);
+  assert.equal(r.targetHadFace, true);
+  assert.deepEqual(r.detail, {
+    qualityFilter: 'AUTO',
+    providerFloor: 80,
+    matches: [{ similarity: 84.27, box: { w: 0.086, h: 0.101 } }],
+    unmatched: [{ box: { w: 0.05, h: 0.06 } }, { box: null }],
+  });
+  const text = JSON.stringify(r.detail);
+  for (const leak of ['Left', 'Top', 'Landmarks', 'leak-id', 'Confidence', '0.41', '0.7']) assert.ok(!text.includes(leak), leak);
+});
+
+test('face_compare log: only the allowed fields, no bytes/paths/user or enrollment ids; match rule unchanged', async () => {
+  const cases = [
+    { sim: 95, had: true, matched: true, outcome: 'matched', detail: { qualityFilter: 'AUTO', providerFloor: 80, matches: [{ similarity: 95.04, box: { w: 0.2, h: 0.25 } }], unmatched: [{ box: { w: 0.1, h: 0.1 } }] } },
+    { sim: 89.96, had: true, matched: false, outcome: 'below_threshold', detail: { qualityFilter: 'AUTO', providerFloor: 80, matches: [{ similarity: 89.96, box: { w: 0.09, h: 0.1 } }], unmatched: [] } },
+    { sim: 90, had: true, matched: true, outcome: 'matched', detail: undefined },
+    { sim: null, had: true, matched: false, outcome: 'below_floor', detail: { qualityFilter: 'AUTO', providerFloor: 80, matches: [], unmatched: [{ box: { w: 0.08, h: 0.1 } }] } },
+    { sim: null, had: false, matched: false, outcome: 'no_face_returned', detail: { qualityFilter: 'AUTO', providerFloor: 80, matches: [], unmatched: [] } },
+  ];
+  for (const c of cases) {
+    const logs: { event: string; f: Record<string, unknown> }[] = [];
+    const store = makeStore({ enrollments: [E], jobs: [uJob()], photos: { [M]: PREVIEW }, objects: { [DETECT]: bytes(4) } });
+    const s = await processBatch(store, fake(async () => ({ similarity: c.sim, targetHadFace: c.had, detail: c.detail })), {
+      limit: 1,
+      log: (event, f) => logs.push({ event, f }),
+    });
+    // Match rule and stored result unchanged: >= 90 matches, the raw similarity is saved.
+    assert.deepEqual(store.saved.map((x) => [x.sim, x.matched]), [[c.sim, c.matched]]);
+    assert.equal(s.matched, c.matched ? 1 : 0);
+    const line = logs.filter((l) => l.event === 'face_compare');
+    assert.equal(line.length, 1);
+    const f = line[0].f;
+    assert.deepEqual(Object.keys(f).sort(), LOG_KEYS);
+    assert.equal(f.room, ROOM);
+    assert.equal(f.media, M);
+    assert.equal(f.target, 'detect');
+    assert.equal(f.threshold, 90);
+    assert.equal(f.matched, c.matched);
+    assert.equal(f.outcome, c.outcome);
+    assert.equal(f.best_similarity, c.sim === null ? null : Math.round(c.sim * 10) / 10);
+    assert.equal(f.quality_filter, c.detail ? 'AUTO' : null);
+    for (const face of f.faces as Record<string, unknown>[]) assert.deepEqual(Object.keys(face).sort(), ['box', 'i', 'returned', 'similarity']);
+    const text = JSON.stringify(f);
+    for (const leak of [E, DETECT, PREVIEW, 'face-refs', 'detect/', 'Left', 'Top']) assert.ok(!text.includes(leak), leak);
+  }
+});
+
+test('face_compare is not logged when no provider call happens or the call fails', async () => {
+  const logs: string[] = [];
+  const store = makeStore({ jobs: [job('a')] });
+  await processBatch(store, fake(async () => { throw new FaceProviderError('transient'); }), { limit: 1, log: (e) => logs.push(e) });
+  const gone = makeStore({ enrollments: [], jobs: [job('b')] });
+  await processBatch(gone, fake(async () => ({ similarity: 99, targetHadFace: true })), { limit: 1, log: (e) => logs.push(e) });
+  assert.ok(!logs.includes('face_compare'));
 });

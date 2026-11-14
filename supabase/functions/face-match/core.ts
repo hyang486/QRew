@@ -1,5 +1,5 @@
 import { detectObjectPath } from '../_shared/detect.ts';
-import { FaceProviderError, MAX_IMAGE_BYTES, type FaceProvider } from './provider.ts';
+import { FaceProviderError, MAX_IMAGE_BYTES, type CompareResult, type FaceProvider } from './provider.ts';
 
 export const MAX_ATTEMPTS = 3;
 /** Estimate threshold for "this photo probably contains you". Tune with real test photos. */
@@ -33,10 +33,57 @@ export interface FaceStore {
 
 export type BatchSummary = { claimed: number; done: number; matched: number; retried: number; failed: number; stale: number; providerCalls: number; aborted: boolean };
 
+/**
+ * The face_compare log line: similarity diagnostics only. Fields: job, room, media (upload id), target (detect copy or
+ * fallback), quality_filter, provider_floor, threshold, best_similarity, matched, target_had_face, outcome, faces
+ * (index, returned at or above the provider floor or below it, similarity if returned, box size as a fraction).
+ * Never image bytes, paths, user or enrollment ids, face ids, landmarks or box position.
+ * outcome: matched | below_threshold (score returned, under threshold) | below_floor (faces found, all under the
+ * provider floor) | no_face_returned (no face detected, or every face dropped by QualityFilter; AWS does not say which).
+ */
+export function compareLogFields(
+  job: Job,
+  roomId: string,
+  target: 'detect' | 'fallback',
+  threshold: number,
+  r: CompareResult,
+  matched: boolean,
+): Record<string, unknown> {
+  const d = r.detail;
+  const round1 = (n: number) => Math.round(n * 10) / 10;
+  const faces = d
+    ? [
+        ...d.matches.map((m) => ({ returned: 'at_or_above_floor', similarity: round1(m.similarity), box: m.box })),
+        ...d.unmatched.map((u) => ({ returned: 'below_floor', similarity: null, box: u.box })),
+      ].map((f, i) => ({ i, ...f }))
+    : [];
+  const outcome = matched
+    ? 'matched'
+    : r.similarity !== null
+      ? 'below_threshold'
+      : r.targetHadFace
+        ? 'below_floor'
+        : 'no_face_returned';
+  return {
+    job: job.id,
+    room: roomId,
+    media: job.media_id,
+    target,
+    quality_filter: d?.qualityFilter ?? null,
+    provider_floor: d?.providerFloor ?? null,
+    threshold,
+    best_similarity: r.similarity === null ? null : round1(r.similarity),
+    matched,
+    target_had_face: r.targetHadFace,
+    outcome,
+    faces,
+  };
+}
+
 export async function processBatch(
   store: FaceStore,
   provider: FaceProvider,
-  opts: { limit: number; threshold?: number; log?: (event: string, fields: Record<string, string | number>) => void },
+  opts: { limit: number; threshold?: number; log?: (event: string, fields: Record<string, unknown>) => void },
 ): Promise<BatchSummary> {
   const threshold = opts.threshold ?? DEFAULT_SIMILARITY_THRESHOLD;
   const log = opts.log ?? (() => {});
@@ -88,13 +135,15 @@ export async function processBatch(
   }
   return s;
 
-  async function runJob(job: Job, enrollment: { id: string; ref_path: string }, fallbackPath: string, detectPath: string | null) {
+  async function runJob(job: Job, enrollment: { id: string; ref_path: string; room_id: string }, fallbackPath: string, detectPath: string | null) {
     if (!refCache.has(enrollment.id)) refCache.set(enrollment.id, await store.download('face-refs', enrollment.ref_path));
     const ref = refCache.get(enrollment.id);
     let target = detectPath ? await store.download('room-media', detectPath) : null;
+    let targetSource: 'detect' | 'fallback' = 'detect';
     if (!target || target.length > MAX_IMAGE_BYTES) {
       log('detect_fallback', { job: job.id, reason: !detectPath ? 'bad_path' : !target ? 'missing' : 'too_large' });
       target = await store.download('room-media', fallbackPath);
+      targetSource = 'fallback';
     }
     if (!ref) {
       await store.finishJob(job.id, 'failed', 'reference_missing');
@@ -120,6 +169,7 @@ export async function processBatch(
       s.providerCalls++;
       const r = await provider.compare(ref, target);
       const matched = r.similarity !== null && r.similarity >= threshold;
+      log('face_compare', compareLogFields(job, enrollment.room_id, targetSource, threshold, r, matched));
       // Late-result guard, part 2: the write itself is conditional on the enrollment still existing.
       const saved = await store.saveMatch(job.enrollment_id, job.media_id, { similarity: r.similarity, matched });
       if (saved === 'stale') {

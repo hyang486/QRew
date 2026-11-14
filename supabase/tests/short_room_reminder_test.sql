@@ -1,4 +1,4 @@
--- G6b short-room reminder window test. Requires migrations through 0025 (short_room_reminder_window).
+-- G6b short-room reminder window test. Requires migrations through 0030 (one_day_room_reminder_window).
 -- One transaction, ends with ROLLBACK: leaves no data behind. Run as postgres (Supabase MCP execute_sql).
 -- private.send_expiry_reminders(p_now) is called with simulated clock values around each window edge.
 -- Success ends with the row 'SHORT ROOM REMINDER TESTS PASSED'.
@@ -7,8 +7,9 @@
 -- Rooms (all created at T = now()):
 --   S3   3 h room                 -> last hour only (window opens at T+2h)
 --   S23  23 h room                -> last hour only (T+22h)
---   S2349 23 h 49 min room        -> last hour only (just under 24 h - 10 min)
---   D2350 23 h 50 min room        -> 24 h window (a "1 day" room created with client clock lag)
+--   S2349 23 h 49 min room        -> last hour only
+--   S2409 24 h 9 min room         -> last hour only (0030: a "1 day" room, often a little over 24 h, is short)
+--   D2410 24 h 10 min room        -> 24 h window (0030 edge: 24 h + 10 min and longer)
 --   D30  30 h room                -> 24 h window (T+6h), as in 0019
 --   X    3 h room extended to 3 days by the host (new expiry version) -> 24 h window
 
@@ -50,23 +51,29 @@ insert into public.rooms (id, host_id, name, created_at, expires_at, code) value
   ('c2510000-0000-4000-8000-000000000001', 'c2500000-0000-4000-8000-000000000001', 'SRR 3h',     now(), now() + interval '3 hours', '92501'),
   ('c2510000-0000-4000-8000-000000000002', 'c2500000-0000-4000-8000-000000000001', 'SRR 23h',    now(), now() + interval '23 hours', '92502'),
   ('c2510000-0000-4000-8000-000000000003', 'c2500000-0000-4000-8000-000000000001', 'SRR 23h49',  now(), now() + interval '23 hours 49 minutes', '92503'),
-  ('c2510000-0000-4000-8000-000000000004', 'c2500000-0000-4000-8000-000000000001', 'SRR 23h50',  now(), now() + interval '23 hours 50 minutes', '92504'),
+  ('c2510000-0000-4000-8000-000000000004', 'c2500000-0000-4000-8000-000000000001', 'SRR 24h9',   now(), now() + interval '24 hours 9 minutes', '92504'),
   ('c2510000-0000-4000-8000-000000000005', 'c2500000-0000-4000-8000-000000000001', 'SRR 30h',    now(), now() + interval '30 hours', '92505'),
-  ('c2510000-0000-4000-8000-000000000006', 'c2500000-0000-4000-8000-000000000001', 'SRR extend', now(), now() + interval '3 hours', '92506');
+  ('c2510000-0000-4000-8000-000000000006', 'c2500000-0000-4000-8000-000000000001', 'SRR extend', now(), now() + interval '3 hours', '92506'),
+  ('c2510000-0000-4000-8000-000000000007', 'c2500000-0000-4000-8000-000000000001', 'SRR 24h10',  now(), now() + interval '24 hours 10 minutes', '92507');
 
 insert into public.room_members (room_id, user_id, role)
-select r.id, 'c2500000-0000-4000-8000-000000000001', 'host' from public.rooms r where r.code between '92501' and '92506';
+select r.id, 'c2500000-0000-4000-8000-000000000001', 'host' from public.rooms r where r.code between '92501' and '92507';
 insert into public.room_members (room_id, user_id, role)
   values ('c2510000-0000-4000-8000-000000000001', 'c2500000-0000-4000-8000-000000000002', 'member');
 
--- 1. Right after creation (T+1s): only the 24-hour rooms that are already inside 24 h (D2350).
---    The 3 h, 23 h and 23 h 49 min rooms are NOT reminded (0019 reminded all of them here).
-select tests.expect_eq(tests.run(interval '1 second'), 1, 'T+1s: only the 23h50 room');
-select tests.expect_eq(tests.reminded('c2510000-0000-4000-8000-000000000004'), 1, 'D2350 reminded at creation (24 h window)');
+-- 1. Right after creation (T+1s): no room is inside its window. The 3 h, 23 h, 23 h 49 min and 24 h 9 min
+--    rooms are NOT reminded (0019 reminded all of them here; 0025 still reminded a 1-day room of 23 h 50 min+).
+select tests.expect_eq(tests.run(interval '1 second'), 0, 'T+1s: nothing');
+select tests.expect_eq(tests.reminded('c2510000-0000-4000-8000-000000000004'), 0, 'S2409 (1-day room) not reminded at creation');
 select tests.expect_eq(tests.reminded('c2510000-0000-4000-8000-000000000001'), 0, 'S3 not reminded at creation');
 select tests.expect_eq(tests.reminded('c2510000-0000-4000-8000-000000000002'), 0, 'S23 not reminded at creation');
 select tests.expect_eq(tests.reminded('c2510000-0000-4000-8000-000000000003'), 0, 'S2349 not reminded at creation');
 select tests.expect_eq(tests.reminded('c2510000-0000-4000-8000-000000000006'), 0, 'X not reminded at creation');
+
+-- D2410 (24 h 10 min) keeps the 24 h window: it opens at T+10m.
+select tests.expect_eq(tests.run(interval '10 minutes' - interval '1 minute'), 0, 'D2410: 1 min before its 24 h window');
+select tests.expect_eq(tests.run(interval '10 minutes' + interval '1 second'), 1, 'D2410: inside its 24 h window');
+select tests.expect_eq(tests.reminded('c2510000-0000-4000-8000-000000000007'), 1, 'D2410 reminded (24 h window)');
 
 -- X: the host extends it to 3 days (new version) right after creation. Its length from created_at is now
 -- 3 days, so it is a 24 h-window room: reminded at T+2d, not in its old last hour.
@@ -93,6 +100,8 @@ select tests.expect_eq(tests.run(interval '22 hours' + interval '1 second'), 1, 
 select tests.expect_eq(tests.reminded('c2510000-0000-4000-8000-000000000002'), 1, 'S23 reminded in its last hour');
 select tests.expect_eq(tests.run(interval '22 hours 48 minutes'), 0, 'T+22h48m: S2349 not yet');
 select tests.expect_eq(tests.run(interval '22 hours 49 minutes' + interval '1 second'), 1, 'T+22h49m: S2349 enters its last hour');
+select tests.expect_eq(tests.run(interval '23 hours 9 minutes' - interval '1 minute'), 0, 'T+23h8m: S2409 not yet');
+select tests.expect_eq(tests.run(interval '23 hours 9 minutes' + interval '1 second'), 1, 'T+23h9m: S2409 enters its last hour');
 
 -- 5. X after the extension: nothing until 24 h before its new end, then once.
 select tests.expect_eq(tests.run(interval '2 days' - interval '1 minute'), 0, 'X: before its 24 h window');

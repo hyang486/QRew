@@ -81,6 +81,28 @@ export function requestMe(me: AskMe | null | undefined): Partial<AskMe> | undefi
   return out;
 }
 
+/** A point as the pace engine keeps it. */
+export type AskPoint = { latitude: number; longitude: number };
+
+const coord = (n: unknown, max: number): n is number => typeof n === 'number' && Number.isFinite(n) && Math.abs(n) <= max;
+
+/**
+ * Bug (b): the `anchor` the server measures progress from when the room has no route. Same order as the pace engine
+ * (engine.ts: `ctx.place ?? tracker.firstPoint`): the room's place pin, else my own start point, else (s11) my first
+ * point shared in this room during this app run. Only the room's pin or my own position, never anyone else's;
+ * undefined (left out) when none is a valid coordinate.
+ */
+export function askAnchor(
+  place: AskPoint | null | undefined,
+  myStart: AskPoint | null | undefined,
+  myFirstShared?: AskPoint | null,
+): { lat: number; lng: number } | undefined {
+  for (const p of [place, myStart, myFirstShared]) {
+    if (p && coord(p.latitude, 90) && coord(p.longitude, 180)) return { lat: p.latitude, lng: p.longitude };
+  }
+  return undefined;
+}
+
 /** The 10.3 request body. Optional fields are left out, not sent as null. */
 export function askBody(
   roomId: string,
@@ -88,6 +110,7 @@ export function askBody(
   history: readonly AskTurn[],
   me?: AskMe | null,
   tz?: string,
+  anchor?: { lat: number; lng: number },
 ): Record<string, unknown> {
   const body: Record<string, unknown> = { action: 'ask', roomId, question };
   const h = requestHistory(history);
@@ -95,6 +118,7 @@ export function askBody(
   const m = requestMe(me);
   if (m) body.me = m;
   if (tz) body.tz = tz;
+  if (anchor) body.anchor = { lat: anchor.lat, lng: anchor.lng };
   return body;
 }
 

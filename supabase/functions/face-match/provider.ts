@@ -9,6 +9,22 @@ export type CompareResult = {
   similarity: number | null;
   /** True when the target contained at least one face. */
   targetHadFace: boolean;
+  /** Diagnostics for the face_compare log only. Never used for the match decision. */
+  detail?: CompareDetail;
+};
+
+/** Face box size as a fraction of the image (0-1, 3 decimals). No position, landmarks or face IDs. */
+export type FaceBoxSize = { w: number; h: number };
+
+export type CompareDetail = {
+  /** QualityFilter sent with the request (AUTO today). */
+  qualityFilter: string;
+  /** SimilarityThreshold sent to the provider; faces under it come back as unmatched with no score. */
+  providerFloor: number;
+  /** Faces returned at or above providerFloor, in response order. */
+  matches: { similarity: number; box: FaceBoxSize | null }[];
+  /** Faces detected but under providerFloor, in response order. */
+  unmatched: { box: FaceBoxSize | null }[];
 };
 
 export type FaceProviderErrorKind =
